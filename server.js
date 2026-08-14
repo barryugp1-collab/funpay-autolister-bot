@@ -14,6 +14,9 @@ if (!DISCORD_TOKEN || !CLIENT_ID || !GUILD_ID || !RESULTS_CHANNEL_ID || !API_KEY
   process.exit(1);
 }
 
+// TEMP DEBUG — remove once auth is confirmed working.
+console.log('BOOT — API_KEY loaded as:', JSON.stringify(API_KEY), 'length:', API_KEY.length);
+
 // ---------- Discord bot ----------
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
@@ -126,6 +129,7 @@ app.use(express.json());
 
 function checkAuth(req, res, next) {
   const key = req.header('x-api-key');
+  console.log('AUTH CHECK — received:', JSON.stringify(key), 'expected:', JSON.stringify(API_KEY), 'match:', key === API_KEY);
   if (!key || key !== API_KEY) return res.status(401).json({ error: 'unauthorized' });
   next();
 }
