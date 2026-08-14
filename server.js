@@ -14,9 +14,6 @@ if (!DISCORD_TOKEN || !CLIENT_ID || !GUILD_ID || !RESULTS_CHANNEL_ID || !API_KEY
   process.exit(1);
 }
 
-// TEMP DEBUG — remove once auth is confirmed working.
-console.log('BOOT — API_KEY loaded as:', JSON.stringify(API_KEY), 'length:', API_KEY.length);
-
 // ---------- Discord bot ----------
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
@@ -106,11 +103,14 @@ async function postResultToDiscord(result) {
     const channel = await client.channels.fetch(RESULTS_CHANNEL_ID);
     if (!channel) return;
     if (result.success) {
+      const sortedPrices = Array.isArray(result.sortedPrices) ? result.sortedPrices : [];
       const lines = [
         '🚀 Listed successfully',
         '',
         `Pet: ${result.petName}${result.mutation ? ` [${result.mutation}]` : ''}`,
         result.targetMsRaw ? `M/s: ${result.targetMsRaw}` : null,
+        sortedPrices.length ? `Competitor prices: ${sortedPrices.map((p) => '$' + Number(p).toFixed(2)).join(', ')}` : null,
+        (result.lowest !== undefined && result.lowest !== null) ? `Lowest competitor: $${Number(result.lowest).toFixed(2)}` : null,
         `Customer price: $${Number(result.customerPrice).toFixed(2)}`,
         `Estimated payout: ~$${Number(result.estimatedPayout).toFixed(2)}`,
       ].filter(Boolean);
@@ -129,7 +129,6 @@ app.use(express.json());
 
 function checkAuth(req, res, next) {
   const key = req.header('x-api-key');
-  console.log('AUTH CHECK — received:', JSON.stringify(key), 'expected:', JSON.stringify(API_KEY), 'match:', key === API_KEY);
   if (!key || key !== API_KEY) return res.status(401).json({ error: 'unauthorized' });
   next();
 }
