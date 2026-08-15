@@ -1,7 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const {
-  Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder,
+  Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuilder,
 } = require('discord.js');
 const store = require('./store');
 
@@ -14,38 +14,24 @@ if (!DISCORD_TOKEN || !CLIENT_ID || !GUILD_ID || !RESULTS_CHANNEL_ID || !API_KEY
   process.exit(1);
 }
 
-// Must match the userscript's CONFIG exactly — these are the correct SAB in-game names.
 const PET_NAMES = [
-  'Garama and Madundung',
-  'Burguro and Fryuro',
-  'La Secret Combinasion',
-  'Cash or Card',
-  'Fragola La La La',
-  'Festive 67',
-  'Boppin Bunny',
-  'Sammyni Fattini',
+  'Garama and Madundung', 'Burguro and Fryuro', 'La Secret Combinasion', 'Cash or Card',
+  'Fragola La La La', 'Festive 67', 'Boppin Bunny', 'Sammyni Fattini',
 ];
-
 const MUTATIONS = [
-  'Gold', 'Diamond', 'Rainbow', 'Lava', 'Galaxy',
-  'Yin Yang', 'Bloodrot', 'Radioactive', 'Candy',
-  'Cursed', 'Divine', 'Neon',
+  'Gold', 'Diamond', 'Rainbow', 'Lava', 'Galaxy', 'Yin Yang', 'Bloodrot',
+  'Radioactive', 'Candy', 'Cursed', 'Divine', 'Neon',
 ];
-
 const TRAITS = [
-  '10B', '26', ':3', 'Blue Balloon', 'Bombardiro', 'Brazil',
-  'Bubblegum', 'Chocolate', 'Comet-struck', 'Crab Claw', 'Disco',
-  'Explosive', 'Fire', 'Fireworks', 'Galactic', 'Glitched',
-  'Granny', 'Green Balloon', 'Halo', 'Indonesia', "Jack O'Lantern Pet",
-  'Lightning', 'Lucky', 'Matteo Hat', 'Meowl', 'Nyan',
-  'Orange Balloon', 'Paint', 'Pink Balloon', 'Rainbow Balloon',
-  'Red Balloon', 'Reindeer Pet', 'RIP Tombstone', 'Rose',
-  'Santa Hat', 'Shark Fin', 'Skeleton', 'Skibidi', 'Sleepy',
-  'Snowy', 'Sombrero', 'Spider', 'Strawberry', 'Taco',
-  'Tie', 'UFO', 'Wet', 'Witching Hour', 'Zombie',
+  '10B', '26', ':3', 'Blue Balloon', 'Bombardiro', 'Brazil', 'Bubblegum', 'Chocolate',
+  'Comet-struck', 'Crab Claw', 'Disco', 'Explosive', 'Fire', 'Fireworks', 'Galactic',
+  'Glitched', 'Granny', 'Green Balloon', 'Halo', 'Indonesia', "Jack O'Lantern Pet",
+  'Lightning', 'Lucky', 'Matteo Hat', 'Meowl', 'Nyan', 'Orange Balloon', 'Paint',
+  'Pink Balloon', 'Rainbow Balloon', 'Red Balloon', 'Reindeer Pet', 'RIP Tombstone',
+  'Rose', 'Santa Hat', 'Shark Fin', 'Skeleton', 'Skibidi', 'Sleepy', 'Snowy', 'Sombrero',
+  'Spider', 'Strawberry', 'Taco', 'Tie', 'UFO', 'Wet', 'Witching Hour', 'Zombie',
 ];
 
-// ---------- Discord bot ----------
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 const commands = [
@@ -55,11 +41,39 @@ const commands = [
     .addStringOption((o) => o.setName('ms').setDescription('Target M/s, e.g. 62.5m/s').setRequired(false))
     .addStringOption((o) => o.setName('mutation').setDescription('Mutation').setRequired(false)
       .addChoices(...MUTATIONS.map((m) => ({ name: m, value: m }))))
-    .addStringOption((o) => o.setName('traits').setDescription('Type to search traits. Pick one, or comma-separate for multiple.').setRequired(false).setAutocomplete(true)),
+    .addStringOption((o) => o.setName('traits').setDescription('Type to search. Comma-separate for multiple.').setRequired(false).setAutocomplete(true)),
+
   new SlashCommandBuilder().setName('bulk').setDescription('Queue multiple listings (one per line)')
-    .addStringOption((o) => o.setName('items').setDescription('e.g. "Garama and Madundung 62.5m/s"').setRequired(true)),
+    .addStringOption((o) => o.setName('items').setDescription('e.g. "Garama and Madundung 62.5m/s [Gold] {Fire,Lucky}"').setRequired(true)),
+
+  new SlashCommandBuilder().setName('dry-run').setDescription('Check pricing without actually listing')
+    .addStringOption((o) => o.setName('brainrot').setDescription('Brainrot name').setRequired(true)
+      .addChoices(...PET_NAMES.map((n) => ({ name: n, value: n }))))
+    .addStringOption((o) => o.setName('ms').setDescription('Target M/s, e.g. 62.5m/s').setRequired(false))
+    .addStringOption((o) => o.setName('mutation').setDescription('Mutation').setRequired(false)
+      .addChoices(...MUTATIONS.map((m) => ({ name: m, value: m }))))
+    .addStringOption((o) => o.setName('traits').setDescription('Comma-separate for multiple.').setRequired(false).setAutocomplete(true)),
+
+  new SlashCommandBuilder().setName('relist').setDescription('Re-queue a listing using its last known settings')
+    .addStringOption((o) => o.setName('brainrot').setDescription('Pick from recent history').setRequired(true).setAutocomplete(true))
+    .addStringOption((o) => o.setName('ms').setDescription('Override M/s (optional)').setRequired(false))
+    .addStringOption((o) => o.setName('mutation').setDescription('Override mutation (optional)').setRequired(false)
+      .addChoices(...MUTATIONS.map((m) => ({ name: m, value: m }))))
+    .addStringOption((o) => o.setName('traits').setDescription('Override traits, comma-separated (optional)').setRequired(false).setAutocomplete(true)),
+
   new SlashCommandBuilder().setName('queue').setDescription('Show pending (not-yet-delivered) commands'),
+  new SlashCommandBuilder().setName('queue-remove').setDescription('Remove a pending command by its position in /queue')
+    .addIntegerOption((o) => o.setName('index').setDescription('Position shown in /queue (1 = first)').setRequired(true)),
+
   new SlashCommandBuilder().setName('status').setDescription('Show bridge status'),
+  new SlashCommandBuilder().setName('history').setDescription('Show recent listing history')
+    .addIntegerOption((o) => o.setName('count').setDescription('How many entries (default 10)').setRequired(false)),
+
+  new SlashCommandBuilder().setName('confirm').setDescription('Approve a price-anomaly-held listing')
+    .addIntegerOption((o) => o.setName('id').setDescription('Held item id').setRequired(true).setAutocomplete(true)),
+  new SlashCommandBuilder().setName('cancel').setDescription('Discard a price-anomaly-held listing')
+    .addIntegerOption((o) => o.setName('id').setDescription('Held item id').setRequired(true).setAutocomplete(true)),
+
   new SlashCommandBuilder().setName('stop').setDescription('Stop the current run and clear pending commands'),
   new SlashCommandBuilder().setName('pause').setDescription('Pause delivering new commands to the userscript'),
   new SlashCommandBuilder().setName('resume').setDescription('Resume delivering commands'),
@@ -77,10 +91,11 @@ function fmtQueue(queue) {
   return queue.map((c, i) => {
     if (c.type === 'list') {
       const mut = c.mutation ? ` [${c.mutation}]` : '';
-      const tr = c.traits && c.traits.length ? ` (${c.traits.join(', ')})` : '';
-      return `${i + 1}. /list ${c.petName}${mut} ${c.targetMsRaw || ''}${tr}`.trim();
+      return `${i + 1}. /list ${c.petName}${mut} ${c.targetMsRaw || ''}`.trim();
     }
     if (c.type === 'bulk') return `${i + 1}. /bulk (${c.text.split('\n').filter(Boolean).length} items)`;
+    if (c.type === 'dryrun') return `${i + 1}. /dry-run ${c.petName}`;
+    if (c.type === 'confirm_list') return `${i + 1}. confirmed listing: ${c.petName}`;
     if (c.type === 'stop') return `${i + 1}. /stop`;
     return `${i + 1}. ${c.type}`;
   }).join('\n');
@@ -89,9 +104,10 @@ function fmtQueue(queue) {
 client.on('ready', () => console.log(`Discord bot logged in as ${client.user.tag}`));
 
 client.on('interactionCreate', async (interaction) => {
-  // --- Autocomplete for the traits field ---
   if (interaction.isAutocomplete()) {
     const focused = interaction.options.getFocused(true);
+    const cmd = interaction.commandName;
+
     if (focused.name === 'traits') {
       const raw = focused.value || '';
       const parts = raw.split(',');
@@ -103,7 +119,37 @@ client.on('interactionCreate', async (interaction) => {
         return { name: full.length > 100 ? full.slice(0, 100) : full, value: full };
       });
       await interaction.respond(choices);
+      return;
     }
+
+    if (cmd === 'relist' && focused.name === 'brainrot') {
+      const q = (focused.value || '').toLowerCase();
+      const seen = new Set();
+      const state = store.getStatus();
+      const opts = [];
+      for (const h of state.history) {
+        const key = (h.petName || '').toLowerCase();
+        if (!key || seen.has(key)) continue;
+        if (q && !key.includes(q)) continue;
+        seen.add(key);
+        opts.push({ name: h.petName, value: h.petName });
+        if (opts.length >= 25) break;
+      }
+      await interaction.respond(opts);
+      return;
+    }
+
+    if ((cmd === 'confirm' || cmd === 'cancel') && focused.name === 'id') {
+      const holds = store.listHolds();
+      const opts = holds.slice(0, 25).map((h) => ({
+        name: `#${h.id} ${h.petName}${h.mutation ? ' [' + h.mutation + ']' : ''} ${h.targetMsRaw || ''} → $${Number(h.customerPrice).toFixed(2)}`.slice(0, 100),
+        value: h.id,
+      }));
+      await interaction.respond(opts);
+      return;
+    }
+
+    await interaction.respond([]);
     return;
   }
 
@@ -126,21 +172,75 @@ client.on('interactionCreate', async (interaction) => {
       store.enqueue('bulk', { text: items });
       const count = items.split('\n').map((l) => l.trim()).filter(Boolean).length;
       await interaction.reply(`📥 Queued bulk job with ~${count} line(s).`);
+    } else if (commandName === 'dry-run') {
+      const petName = interaction.options.getString('brainrot', true);
+      const ms = interaction.options.getString('ms') || '';
+      const mutation = interaction.options.getString('mutation') || '';
+      const traitsRaw = interaction.options.getString('traits') || '';
+      const traits = traitsRaw.split(',').map((t) => t.trim()).filter(Boolean);
+      store.enqueue('dryrun', { petName, targetMsRaw: ms, mutation, traits });
+      await interaction.reply(`🧪 Dry run queued for **${petName}** — no listing will be created.`);
+    } else if (commandName === 'relist') {
+      const petName = interaction.options.getString('brainrot', true);
+      const msOverride = interaction.options.getString('ms');
+      const mutationOverride = interaction.options.getString('mutation');
+      const traitsOverrideRaw = interaction.options.getString('traits');
+      const state = store.getStatus();
+      const prior = state.history.find((h) => (h.petName || '').toLowerCase() === petName.toLowerCase() && h.success);
+      const ms = msOverride || (prior ? prior.targetMsRaw : '') || '';
+      const mutation = mutationOverride || (prior ? prior.mutation : '') || '';
+      const traits = traitsOverrideRaw
+        ? traitsOverrideRaw.split(',').map((t) => t.trim()).filter(Boolean)
+        : (prior && prior.traits) || [];
+      store.enqueue('list', { petName, targetMsRaw: ms, mutation, traits });
+      await interaction.reply(`📥 Re-queued: **${petName}**${mutation ? ` [${mutation}]` : ''}${ms ? ` @ ${ms}` : ''}`);
     } else if (commandName === 'queue') {
       const state = store.getStatus();
       await interaction.reply(`\`\`\`\n${fmtQueue(state.queue)}\n\`\`\``);
+    } else if (commandName === 'queue-remove') {
+      const idx = interaction.options.getInteger('index', true);
+      const removed = store.removeAt(idx - 1);
+      if (!removed) { await interaction.reply(`⚠️ No queued command at position ${idx}. Run /queue to check.`); return; }
+      await interaction.reply(`🗑️ Removed: ${removed.type === 'list' ? `/list ${removed.petName} ${removed.targetMsRaw || ''}`.trim() : removed.type}`);
     } else if (commandName === 'status') {
       const state = store.getStatus();
       const online = state.lastPoll && (Date.now() - state.lastPoll < 30000);
+      const holdCount = Object.keys(state.holds || {}).length;
       const lines = [
         `Bridge: ${online ? '🟢 online' : "🔴 offline (userscript hasn't polled recently)"}`,
         `Paused: ${state.paused ? '⏸ yes' : '▶️ no'}`,
         `Queued commands: ${state.queue.length}`,
+        `Held for confirmation: ${holdCount}`,
         state.lastResult
           ? `Last result: ${state.lastResult.success ? '✅' : '❌'} ${state.lastResult.petName || ''}`
           : 'Last result: none yet',
       ];
       await interaction.reply(lines.join('\n'));
+    } else if (commandName === 'history') {
+      const count = interaction.options.getInteger('count') || 10;
+      const items = store.getHistory(count);
+      if (!items.length) { await interaction.reply('No history yet.'); return; }
+      const lines = items.map((h) => {
+        const when = new Date(h.timestamp).toLocaleTimeString();
+        if (h.success) return `${when} ✅ ${h.petName}${h.mutation ? ` [${h.mutation}]` : ''} — $${Number(h.customerPrice).toFixed(2)}`;
+        return `${when} ❌ ${h.petName || 'unknown'} — ${h.error || 'failed'}`;
+      });
+      await interaction.reply(`\`\`\`\n${lines.join('\n')}\n\`\`\``);
+    } else if (commandName === 'confirm') {
+      const id = interaction.options.getInteger('id', true);
+      const hold = store.removeHold(id);
+      if (!hold) { await interaction.reply(`⚠️ No held item with id #${id}.`); return; }
+      store.enqueue('confirm_list', {
+        petName: hold.petName, mutation: hold.mutation, targetMsRaw: hold.targetMsRaw,
+        traits: hold.traits, price: hold.customerPrice, estimatedPayout: hold.estimatedPayout,
+        lowest: hold.lowest, sortedPrices: hold.sortedPrices,
+      });
+      await interaction.reply(`✅ Confirmed #${id} — proceeding with **${hold.petName}** at $${Number(hold.customerPrice).toFixed(2)}.`);
+    } else if (commandName === 'cancel') {
+      const id = interaction.options.getInteger('id', true);
+      const hold = store.removeHold(id);
+      if (!hold) { await interaction.reply(`⚠️ No held item with id #${id}.`); return; }
+      await interaction.reply(`🚫 Cancelled #${id} — **${hold.petName}** will not be listed.`);
     } else if (commandName === 'stop') {
       store.stopNow();
       await interaction.reply('🛑 Stop sent. Pending list/bulk commands cleared.');
@@ -160,28 +260,98 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
-async function postResultToDiscord(result) {
+async function postResultToDiscord(result, duplicateNote) {
   try {
     const channel = await client.channels.fetch(RESULTS_CHANNEL_ID);
     if (!channel) return;
     if (result.success) {
       const sortedPrices = Array.isArray(result.sortedPrices) ? result.sortedPrices : [];
-      const lines = [
-        '🚀 Listed successfully',
-        '',
-        `Pet: ${result.petName}${result.mutation ? ` [${result.mutation}]` : ''}`,
-        result.targetMsRaw ? `M/s: ${result.targetMsRaw}` : null,
-        sortedPrices.length ? `Competitor prices: ${sortedPrices.map((p) => '$' + Number(p).toFixed(2)).join(', ')}` : null,
-        (result.lowest !== undefined && result.lowest !== null) ? `Lowest competitor: $${Number(result.lowest).toFixed(2)}` : null,
-        `Customer price: $${Number(result.customerPrice).toFixed(2)}`,
-        `Estimated payout: ~$${Number(result.estimatedPayout).toFixed(2)}`,
-      ].filter(Boolean);
-      await channel.send(lines.join('\n'));
+      const embed = new EmbedBuilder()
+        .setTitle('🚀 Listed successfully')
+        .setColor(0x2ecc71)
+        .addFields(
+          { name: 'Pet', value: `${result.petName}${result.mutation ? ` [${result.mutation}]` : ''}`, inline: true },
+          ...(result.targetMsRaw ? [{ name: 'M/s', value: result.targetMsRaw, inline: true }] : []),
+          ...(sortedPrices.length ? [{ name: 'Competitor prices', value: sortedPrices.map((p) => '$' + Number(p).toFixed(2)).join(', ') }] : []),
+          ...(result.lowest != null ? [{ name: 'Lowest competitor', value: `$${Number(result.lowest).toFixed(2)}`, inline: true }] : []),
+          { name: 'Customer price', value: `$${Number(result.customerPrice).toFixed(2)}`, inline: true },
+          { name: 'Est. payout', value: `~$${Number(result.estimatedPayout).toFixed(2)}`, inline: true },
+        )
+        .setTimestamp(Date.now());
+      if (duplicateNote) embed.setDescription(duplicateNote);
+      await channel.send({ embeds: [embed] });
     } else {
-      await channel.send(`❌ Listing failed for **${result.petName || 'unknown item'}**\nError: ${result.error || 'unknown error'}`);
+      const embed = new EmbedBuilder()
+        .setTitle('❌ Listing failed')
+        .setColor(0xe74c3c)
+        .addFields(
+          { name: 'Pet', value: result.petName || 'unknown' },
+          { name: 'Error', value: (result.error || 'unknown error').slice(0, 1000) },
+        )
+        .setTimestamp(Date.now());
+      await channel.send({ embeds: [embed] });
     }
   } catch (e) {
     console.error('Failed to post result to Discord:', e);
+  }
+}
+
+async function postHoldAlert(id, data) {
+  try {
+    const channel = await client.channels.fetch(RESULTS_CHANNEL_ID);
+    if (!channel) return;
+    const sortedPrices = Array.isArray(data.sortedPrices) ? data.sortedPrices : [];
+    const embed = new EmbedBuilder()
+      .setTitle(`⏸ Price anomaly — held for confirmation (#${id})`)
+      .setColor(0xf1c40f)
+      .setDescription(data.reason || 'Computed price looks unusual compared to recent listings.')
+      .addFields(
+        { name: 'Pet', value: `${data.petName}${data.mutation ? ` [${data.mutation}]` : ''}`, inline: true },
+        ...(data.targetMsRaw ? [{ name: 'M/s', value: data.targetMsRaw, inline: true }] : []),
+        ...(sortedPrices.length ? [{ name: 'Competitor prices', value: sortedPrices.map((p) => '$' + Number(p).toFixed(2)).join(', ') }] : []),
+        { name: 'Would list at', value: `$${Number(data.customerPrice).toFixed(2)}`, inline: true },
+        { name: 'Est. payout', value: `~$${Number(data.estimatedPayout).toFixed(2)}`, inline: true },
+      )
+      .setFooter({ text: `/confirm id:${id}  or  /cancel id:${id}` });
+    await channel.send({ embeds: [embed] });
+  } catch (e) {
+    console.error('Failed to post hold alert:', e);
+  }
+}
+
+async function postDryRunResult(result) {
+  try {
+    const channel = await client.channels.fetch(RESULTS_CHANNEL_ID);
+    if (!channel) return;
+    if (result.success) {
+      const sortedPrices = Array.isArray(result.sortedPrices) ? result.sortedPrices : [];
+      const embed = new EmbedBuilder()
+        .setTitle('🧪 Dry run result')
+        .setColor(0x3498db)
+        .addFields(
+          { name: 'Pet', value: `${result.petName}${result.mutation ? ` [${result.mutation}]` : ''}`, inline: true },
+          ...(sortedPrices.length ? [{ name: 'Competitor prices', value: sortedPrices.map((p) => '$' + Number(p).toFixed(2)).join(', ') }] : []),
+          { name: 'Would list at', value: `$${Number(result.customerPrice).toFixed(2)}`, inline: true },
+          { name: 'Est. payout', value: `~$${Number(result.estimatedPayout).toFixed(2)}`, inline: true },
+        )
+        .setFooter({ text: 'No listing was created.' });
+      await channel.send({ embeds: [embed] });
+    } else {
+      await channel.send(`🧪 Dry run failed for **${result.petName || 'unknown'}**: ${result.error || 'unknown error'}`);
+    }
+  } catch (e) {
+    console.error('Failed to post dry run result:', e);
+  }
+}
+
+async function postBulkProgress(p) {
+  try {
+    const channel = await client.channels.fetch(RESULTS_CHANNEL_ID);
+    if (!channel) return;
+    const icon = p.success ? '✅' : '❌';
+    await channel.send(`${icon} Bulk: ${p.petName} — ${p.itemsLeft} item(s) left in queue.`);
+  } catch (e) {
+    console.error('Failed to post bulk progress:', e);
   }
 }
 
@@ -202,9 +372,35 @@ app.get('/api/queue', checkAuth, (req, res) => {
 });
 
 app.post('/api/result', checkAuth, async (req, res) => {
-  const result = req.body || {};
-  store.setLastResult(result);
-  await postResultToDiscord(result);
+  const payload = req.body || {};
+
+  if (payload.type === 'hold') {
+    const id = store.holdForConfirmation(payload);
+    await postHoldAlert(id, payload);
+    res.json({ ok: true, holdId: id });
+    return;
+  }
+
+  if (payload.type === 'bulk_progress') {
+    await postBulkProgress(payload);
+    res.json({ ok: true });
+    return;
+  }
+
+  if (payload.type === 'dryrun') {
+    await postDryRunResult(payload);
+    res.json({ ok: true });
+    return;
+  }
+
+  let duplicateNote = null;
+  if (payload.success) {
+    const dup = store.findRecentDuplicate(payload.petName, payload.mutation, payload.targetMsRaw, 30 * 60 * 1000);
+    if (dup) duplicateNote = `⚠️ Same item was listed ${Math.round((Date.now() - dup.timestamp) / 60000)} min ago too.`;
+  }
+  store.setLastResult(payload);
+  store.addHistory(payload);
+  await postResultToDiscord(payload, duplicateNote);
   res.json({ ok: true });
 });
 
@@ -215,6 +411,20 @@ app.get('/api/status', checkAuth, (req, res) => {
 async function main() {
   await client.login(DISCORD_TOKEN);
   await registerCommands();
+
+  setInterval(async () => {
+    const state = store.getStatus();
+    if (!state.lastPoll) return;
+    const offline = Date.now() - state.lastPoll > 40000;
+    if (offline && !state.offlineAlerted) {
+      store.markOfflineAlerted();
+      try {
+        const channel = await client.channels.fetch(RESULTS_CHANNEL_ID);
+        if (channel) await channel.send("⚠️ Bridge went offline — the userscript hasn't polled in over 40 seconds. Make sure the FunPay tab is open and active.");
+      } catch (e) { console.error('Failed to post offline alert:', e); }
+    }
+  }, 30000);
+
   const port = PORT || 3000;
   app.listen(port, () => console.log(`API listening on port ${port}`));
 }
