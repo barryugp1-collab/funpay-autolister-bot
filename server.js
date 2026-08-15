@@ -7,6 +7,7 @@ const store = require('./store');
 
 const {
   DISCORD_TOKEN, CLIENT_ID, GUILD_ID, RESULTS_CHANNEL_ID, API_KEY, PORT,
+  STOCK_BOT_ID, // optional — if set, only this author's messages are parsed as stock feed
 } = process.env;
 
 if (!DISCORD_TOKEN || !CLIENT_ID || !GUILD_ID || !RESULTS_CHANNEL_ID || !API_KEY) {
@@ -32,7 +33,13 @@ const TRAITS = [
   'Spider', 'Strawberry', 'Taco', 'Tie', 'UFO', 'Wet', 'Witching Hour', 'Zombie',
 ];
 
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent, // requires the privileged intent toggle in the Dev Portal
+  ],
+});
 
 const commands = [
   new SlashCommandBuilder().setName('list').setDescription('Queue a single brainrot listing')
@@ -69,9 +76,9 @@ const commands = [
   new SlashCommandBuilder().setName('history').setDescription('Show recent listing history')
     .addIntegerOption((o) => o.setName('count').setDescription('How many entries (default 10)').setRequired(false)),
 
-  new SlashCommandBuilder().setName('confirm').setDescription('Approve a price-anomaly-held listing')
+  new SlashCommandBuilder().setName('confirm').setDescription('Approve a held listing')
     .addIntegerOption((o) => o.setName('id').setDescription('Held item id').setRequired(true).setAutocomplete(true)),
-  new SlashCommandBuilder().setName('cancel').setDescription('Discard a price-anomaly-held listing')
+  new SlashCommandBuilder().setName('cancel').setDescription('Discard a held listing')
     .addIntegerOption((o) => o.setName('id').setDescription('Held item id').setRequired(true).setAutocomplete(true)),
 
   new SlashCommandBuilder().setName('stop').setDescription('Stop the current run and clear pending commands'),
@@ -95,6 +102,7 @@ function fmtQueue(queue) {
     }
     if (c.type === 'bulk') return `${i + 1}. /bulk (${c.text.split('\n').filter(Boolean).length} items)`;
     if (c.type === 'dryrun') return `${i + 1}. /dry-run ${c.petName}`;
+    if (c.type === 'stock_check') return `${i + 1}. 📦 stock check: ${c.petName}`;
     if (c.type === 'confirm_list') return `${i + 1}. confirmed listing: ${c.petName}`;
     if (c.type === 'stop') return `${i + 1}. /stop`;
     return `${i + 1}. ${c.type}`;
@@ -102,6 +110,75 @@ function fmtQueue(queue) {
 }
 
 client.on('ready', () => console.log(`Discord bot logged in as ${client.user.tag}`));
+
+// ---------- Stock feed listener (Captain Hook parsing) ----------
+function stripMd(s) {
+  return s.replace(/\*\*/g, '').replace(/__/g, '');
+}
+
+function toMsRaw(dollars) {
+  const trim = (n) => parseFloat(n.toFixed(4)).toString();
+  if (dollars >= 1e9) return trim(dollars / 1e9) + 'B/s';
+  return trim(dollars / 1e6) + 'M/s';
+}
+
+function parseStockMessage(rawContent) {
+  const content = stripMd(rawContent);
+  const entries = [];
+  const re = /name:\s*(.+?)\s*\n\s*money per sec:\s*([\d.,]+)\s*\$\/s\s*\n\s*mutation:\s*(.*?)\s*\n\s*traits:\s*(.*?)(?=\n\s*name:|$)/gis;
+  let m;
+  while ((m = re.exec(content)) !== null) {
+    const name = m[1].trim();
+    const dollars = parseFloat(m[2].replace(/,/g, ''));
+    let mutation = m[3].trim();
+    if (/^none$/i.test(mutation)) mutation = '';
+    const traitsRaw = m[4].trim();
+    const traits = (!traitsRaw || /^none$/i.test(traitsRaw))
+      ? []
+      : traitsRaw.split(',').map((t) => t.trim()).filter(Boolean);
+    if (!name || isNaN(dollars)) continue;
+    entries.push({ name, dollars, mutation, traits });
+  }
+  return entries;
+}
+
+async function handleStockMessage(message) {
+  if (!message.content) return;
+  if (STOCK_BOT_ID && message.author.id !== STOCK_BOT_ID) return;
+  if (message.channel.id !== RESULTS_CHANNEL_ID) return;
+
+  const entries = parseStockMessage(message.content);
+  if (!entries.length) return;
+
+  for (const entry of entries) {
+    const match = PET_NAMES.find((p) => p.toLowerCase() === entry.name.toLowerCase());
+    if (!match) continue; // only react to your 8 tracked brainrots
+
+    const targetMsRaw = toMsRaw(entry.dollars);
+    const key = [match, entry.mutation, targetMsRaw, entry.traits.slice().sort().join(',')].join('|').toLowerCase();
+
+    if (store.wasRecentlyTriggered(key)) continue;
+    store.markTriggered(key);
+
+    store.enqueue('stock_check', {
+      petName: match,
+      mutation: entry.mutation,
+      targetMsRaw,
+      traits: entry.traits,
+    });
+
+    try {
+      const channel = await client.channels.fetch(RESULTS_CHANNEL_ID);
+      if (channel) {
+        await channel.send(`📦 Stock match: **${match}**${entry.mutation ? ` [${entry.mutation}]` : ''} @ ${targetMsRaw} — checking FunPay price…`);
+      }
+    } catch (e) { console.error('Failed to post stock-match note:', e); }
+  }
+}
+
+client.on('messageCreate', (message) => {
+  handleStockMessage(message).catch((e) => console.error('Stock message handling error:', e));
+});
 
 client.on('interactionCreate', async (interaction) => {
   if (interaction.isAutocomplete()) {
@@ -302,9 +379,9 @@ async function postHoldAlert(id, data) {
     if (!channel) return;
     const sortedPrices = Array.isArray(data.sortedPrices) ? data.sortedPrices : [];
     const embed = new EmbedBuilder()
-      .setTitle(`⏸ Price anomaly — held for confirmation (#${id})`)
+      .setTitle(`⏸ Held for confirmation (#${id})`)
       .setColor(0xf1c40f)
-      .setDescription(data.reason || 'Computed price looks unusual compared to recent listings.')
+      .setDescription(data.reason || 'Held for review.')
       .addFields(
         { name: 'Pet', value: `${data.petName}${data.mutation ? ` [${data.mutation}]` : ''}`, inline: true },
         ...(data.targetMsRaw ? [{ name: 'M/s', value: data.targetMsRaw, inline: true }] : []),
