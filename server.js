@@ -37,7 +37,7 @@ const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent, // requires the privileged intent toggle in the Dev Portal
+    GatewayIntentBits.MessageContent,
   ],
 });
 
@@ -80,6 +80,8 @@ const commands = [
     .addIntegerOption((o) => o.setName('id').setDescription('Held item id').setRequired(true).setAutocomplete(true)),
   new SlashCommandBuilder().setName('cancel').setDescription('Discard a held listing')
     .addIntegerOption((o) => o.setName('id').setDescription('Held item id').setRequired(true).setAutocomplete(true)),
+  new SlashCommandBuilder().setName('confirm-all').setDescription('Approve every currently held listing'),
+  new SlashCommandBuilder().setName('cancel-all').setDescription('Discard every currently held listing'),
 
   new SlashCommandBuilder().setName('stop').setDescription('Stop the current run and clear pending commands'),
   new SlashCommandBuilder().setName('pause').setDescription('Pause delivering new commands to the userscript'),
@@ -152,7 +154,7 @@ async function handleStockMessage(message) {
 
   for (const entry of entries) {
     const match = PET_NAMES.find((p) => p.toLowerCase() === entry.name.toLowerCase());
-    if (!match) continue; // only react to your 8 tracked brainrots
+    if (!match) continue;
 
     const targetMsRaw = toMsRaw(entry.dollars);
     const key = [match, entry.mutation, targetMsRaw, entry.traits.slice().sort().join(',')].join('|').toLowerCase();
@@ -318,6 +320,23 @@ client.on('interactionCreate', async (interaction) => {
       const hold = store.removeHold(id);
       if (!hold) { await interaction.reply(`⚠️ No held item with id #${id}.`); return; }
       await interaction.reply(`🚫 Cancelled #${id} — **${hold.petName}** will not be listed.`);
+    } else if (commandName === 'confirm-all') {
+      const holds = store.listHolds();
+      if (!holds.length) { await interaction.reply('No held items to confirm.'); return; }
+      for (const hold of holds) {
+        store.removeHold(hold.id);
+        store.enqueue('confirm_list', {
+          petName: hold.petName, mutation: hold.mutation, targetMsRaw: hold.targetMsRaw,
+          traits: hold.traits, price: hold.customerPrice, estimatedPayout: hold.estimatedPayout,
+          lowest: hold.lowest, sortedPrices: hold.sortedPrices,
+        });
+      }
+      await interaction.reply(`✅ Confirmed ${holds.length} held item(s): ${holds.map((h) => h.petName).join(', ')}`);
+    } else if (commandName === 'cancel-all') {
+      const holds = store.listHolds();
+      if (!holds.length) { await interaction.reply('No held items to cancel.'); return; }
+      holds.forEach((h) => store.removeHold(h.id));
+      await interaction.reply(`🚫 Cancelled ${holds.length} held item(s): ${holds.map((h) => h.petName).join(', ')}`);
     } else if (commandName === 'stop') {
       store.stopNow();
       await interaction.reply('🛑 Stop sent. Pending list/bulk commands cleared.');
@@ -389,7 +408,7 @@ async function postHoldAlert(id, data) {
         { name: 'Would list at', value: `$${Number(data.customerPrice).toFixed(2)}`, inline: true },
         { name: 'Est. payout', value: `~$${Number(data.estimatedPayout).toFixed(2)}`, inline: true },
       )
-      .setFooter({ text: `/confirm id:${id}  or  /cancel id:${id}` });
+      .setFooter({ text: `/confirm id:${id}  or  /cancel id:${id}  —  or /confirm-all / /cancel-all` });
     await channel.send({ embeds: [embed] });
   } catch (e) {
     console.error('Failed to post hold alert:', e);
