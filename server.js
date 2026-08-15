@@ -14,13 +14,48 @@ if (!DISCORD_TOKEN || !CLIENT_ID || !GUILD_ID || !RESULTS_CHANNEL_ID || !API_KEY
   process.exit(1);
 }
 
+// Must match the userscript's CONFIG exactly — these are the correct SAB in-game names.
+const PET_NAMES = [
+  'Garama and Madundung',
+  'Burguro and Fryuro',
+  'La Secret Combinasion',
+  'Cash or Card',
+  'Fragola La La La',
+  'Festive 67',
+  'Boppin Bunny',
+  'Sammyni Fattini',
+];
+
+const MUTATIONS = [
+  'Gold', 'Diamond', 'Rainbow', 'Lava', 'Galaxy',
+  'Yin Yang', 'Bloodrot', 'Radioactive', 'Candy',
+  'Cursed', 'Divine', 'Neon',
+];
+
+const TRAITS = [
+  '10B', '26', ':3', 'Blue Balloon', 'Bombardiro', 'Brazil',
+  'Bubblegum', 'Chocolate', 'Comet-struck', 'Crab Claw', 'Disco',
+  'Explosive', 'Fire', 'Fireworks', 'Galactic', 'Glitched',
+  'Granny', 'Green Balloon', 'Halo', 'Indonesia', "Jack O'Lantern Pet",
+  'Lightning', 'Lucky', 'Matteo Hat', 'Meowl', 'Nyan',
+  'Orange Balloon', 'Paint', 'Pink Balloon', 'Rainbow Balloon',
+  'Red Balloon', 'Reindeer Pet', 'RIP Tombstone', 'Rose',
+  'Santa Hat', 'Shark Fin', 'Skeleton', 'Skibidi', 'Sleepy',
+  'Snowy', 'Sombrero', 'Spider', 'Strawberry', 'Taco',
+  'Tie', 'UFO', 'Wet', 'Witching Hour', 'Zombie',
+];
+
 // ---------- Discord bot ----------
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 const commands = [
   new SlashCommandBuilder().setName('list').setDescription('Queue a single brainrot listing')
-    .addStringOption((o) => o.setName('brainrot').setDescription('Brainrot name').setRequired(true))
-    .addStringOption((o) => o.setName('ms').setDescription('Target M/s, e.g. 62.5m/s').setRequired(false)),
+    .addStringOption((o) => o.setName('brainrot').setDescription('Brainrot name').setRequired(true)
+      .addChoices(...PET_NAMES.map((n) => ({ name: n, value: n }))))
+    .addStringOption((o) => o.setName('ms').setDescription('Target M/s, e.g. 62.5m/s').setRequired(false))
+    .addStringOption((o) => o.setName('mutation').setDescription('Mutation').setRequired(false)
+      .addChoices(...MUTATIONS.map((m) => ({ name: m, value: m }))))
+    .addStringOption((o) => o.setName('traits').setDescription('Type to search traits. Pick one, or comma-separate for multiple.').setRequired(false).setAutocomplete(true)),
   new SlashCommandBuilder().setName('bulk').setDescription('Queue multiple listings (one per line)')
     .addStringOption((o) => o.setName('items').setDescription('e.g. "Garama and Madundung 62.5m/s"').setRequired(true)),
   new SlashCommandBuilder().setName('queue').setDescription('Show pending (not-yet-delivered) commands'),
@@ -40,7 +75,11 @@ async function registerCommands() {
 function fmtQueue(queue) {
   if (!queue.length) return 'Queue is empty.';
   return queue.map((c, i) => {
-    if (c.type === 'list') return `${i + 1}. /list ${c.petName} ${c.targetMsRaw || ''}`.trim();
+    if (c.type === 'list') {
+      const mut = c.mutation ? ` [${c.mutation}]` : '';
+      const tr = c.traits && c.traits.length ? ` (${c.traits.join(', ')})` : '';
+      return `${i + 1}. /list ${c.petName}${mut} ${c.targetMsRaw || ''}${tr}`.trim();
+    }
     if (c.type === 'bulk') return `${i + 1}. /bulk (${c.text.split('\n').filter(Boolean).length} items)`;
     if (c.type === 'stop') return `${i + 1}. /stop`;
     return `${i + 1}. ${c.type}`;
@@ -50,6 +89,24 @@ function fmtQueue(queue) {
 client.on('ready', () => console.log(`Discord bot logged in as ${client.user.tag}`));
 
 client.on('interactionCreate', async (interaction) => {
+  // --- Autocomplete for the traits field ---
+  if (interaction.isAutocomplete()) {
+    const focused = interaction.options.getFocused(true);
+    if (focused.name === 'traits') {
+      const raw = focused.value || '';
+      const parts = raw.split(',');
+      const current = parts[parts.length - 1].trim().toLowerCase();
+      const prefix = parts.slice(0, -1).map((s) => s.trim()).filter(Boolean);
+      const matches = TRAITS.filter((t) => t.toLowerCase().includes(current)).slice(0, 25);
+      const choices = matches.map((t) => {
+        const full = [...prefix, t].join(', ');
+        return { name: full.length > 100 ? full.slice(0, 100) : full, value: full };
+      });
+      await interaction.respond(choices);
+    }
+    return;
+  }
+
   if (!interaction.isChatInputCommand()) return;
   const { commandName } = interaction;
 
@@ -57,8 +114,13 @@ client.on('interactionCreate', async (interaction) => {
     if (commandName === 'list') {
       const petName = interaction.options.getString('brainrot', true);
       const ms = interaction.options.getString('ms') || '';
-      store.enqueue('list', { petName, targetMsRaw: ms });
-      await interaction.reply(`📥 Queued: **${petName}**${ms ? ` @ ${ms}` : ''}`);
+      const mutation = interaction.options.getString('mutation') || '';
+      const traitsRaw = interaction.options.getString('traits') || '';
+      const traits = traitsRaw.split(',').map((t) => t.trim()).filter(Boolean);
+      store.enqueue('list', { petName, targetMsRaw: ms, mutation, traits });
+      const mutTxt = mutation ? ` [${mutation}]` : '';
+      const trTxt = traits.length ? ` (${traits.join(', ')})` : '';
+      await interaction.reply(`📥 Queued: **${petName}**${mutTxt}${ms ? ` @ ${ms}` : ''}${trTxt}`);
     } else if (commandName === 'bulk') {
       const items = interaction.options.getString('items', true);
       store.enqueue('bulk', { text: items });
