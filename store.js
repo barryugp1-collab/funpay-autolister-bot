@@ -2,25 +2,31 @@ const fs = require('fs');
 const path = require('path');
 
 const FILE = path.join(__dirname, 'queue-data.json');
+const MAX_HISTORY = 50;
 
 function defaultState() {
-  return { queue: [], paused: false, lastPoll: null, lastResult: null, nextId: 1 };
+  return {
+    queue: [], paused: false, lastPoll: null, lastResult: null, nextId: 1,
+    history: [], holds: {}, nextHoldId: 1, offlineAlerted: false,
+  };
 }
 
 function load() {
   try {
-    return JSON.parse(fs.readFileSync(FILE, 'utf8'));
+    const state = JSON.parse(fs.readFileSync(FILE, 'utf8'));
+    if (!state.history) state.history = [];
+    if (!state.holds) state.holds = {};
+    if (!state.nextHoldId) state.nextHoldId = 1;
+    if (state.offlineAlerted === undefined) state.offlineAlerted = false;
+    return state;
   } catch (e) {
     return defaultState();
   }
 }
 
 function save(state) {
-  try {
-    fs.writeFileSync(FILE, JSON.stringify(state, null, 2));
-  } catch (e) {
-    console.error('Failed to save state:', e);
-  }
+  try { fs.writeFileSync(FILE, JSON.stringify(state, null, 2)); }
+  catch (e) { console.error('Failed to save state:', e); }
 }
 
 function enqueue(type, payload) {
@@ -31,17 +37,23 @@ function enqueue(type, payload) {
   return cmd;
 }
 
+function removeAt(index) {
+  const state = load();
+  if (index < 0 || index >= state.queue.length) return null;
+  const [removed] = state.queue.splice(index, 1);
+  save(state);
+  return removed;
+}
+
 function clearQueue() {
   const state = load();
   state.queue = [];
   save(state);
 }
 
-// /stop clears any not-yet-delivered list/bulk work AND pushes a 'stop'
-// command so an item the userscript is actively mid-way through also halts.
 function stopNow() {
   const state = load();
-  state.queue = state.queue.filter((c) => c.type !== 'list' && c.type !== 'bulk');
+  state.queue = state.queue.filter((c) => !['list', 'bulk', 'confirm_list', 'dryrun'].includes(c.type));
   state.queue.push({ id: state.nextId++, type: 'stop', createdAt: Date.now() });
   save(state);
 }
@@ -52,12 +64,8 @@ function setPaused(v) {
   save(state);
 }
 
-function getStatus() {
-  return load();
-}
+function getStatus() { return load(); }
 
-// Called when the userscript polls. While paused, 'stop' commands still get
-// delivered immediately, but 'list'/'bulk' stay queued until /resume.
 function drainDeliverable() {
   const state = load();
   let deliverable;
@@ -69,6 +77,7 @@ function drainDeliverable() {
     state.queue = [];
   }
   state.lastPoll = Date.now();
+  state.offlineAlerted = false;
   save(state);
   return { paused: state.paused, commands: deliverable };
 }
@@ -79,6 +88,61 @@ function setLastResult(result) {
   save(state);
 }
 
+function addHistory(entry) {
+  const state = load();
+  state.history.unshift({ ...entry, timestamp: Date.now() });
+  if (state.history.length > MAX_HISTORY) state.history.length = MAX_HISTORY;
+  save(state);
+}
+
+function getHistory(count) {
+  const state = load();
+  return state.history.slice(0, count || 10);
+}
+
+function findRecentDuplicate(petName, mutation, targetMsRaw, windowMs) {
+  const state = load();
+  const now = Date.now();
+  const needle = (petName || '').trim().toLowerCase();
+  const needMut = (mutation || '').trim().toLowerCase();
+  const needMs = (targetMsRaw || '').trim().toLowerCase();
+  return state.history.find((h) => {
+    if (!h.success) return false;
+    if (now - h.timestamp > windowMs) return false;
+    if ((h.petName || '').trim().toLowerCase() !== needle) return false;
+    if ((h.mutation || '').trim().toLowerCase() !== needMut) return false;
+    if ((h.targetMsRaw || '').trim().toLowerCase() !== needMs) return false;
+    return true;
+  });
+}
+
+function holdForConfirmation(data) {
+  const state = load();
+  const id = state.nextHoldId++;
+  state.holds[id] = { ...data, id, createdAt: Date.now() };
+  save(state);
+  return id;
+}
+
+function getHold(id) { return load().holds[id] || null; }
+function listHolds() { return Object.values(load().holds); }
+
+function removeHold(id) {
+  const state = load();
+  const hold = state.holds[id];
+  delete state.holds[id];
+  save(state);
+  return hold || null;
+}
+
+function markOfflineAlerted() {
+  const state = load();
+  state.offlineAlerted = true;
+  save(state);
+}
+
 module.exports = {
-  enqueue, clearQueue, stopNow, setPaused, getStatus, drainDeliverable, setLastResult, load,
+  enqueue, removeAt, clearQueue, stopNow, setPaused, getStatus, drainDeliverable,
+  setLastResult, addHistory, getHistory, findRecentDuplicate,
+  holdForConfirmation, getHold, listHolds, removeHold, markOfflineAlerted, load,
 };
