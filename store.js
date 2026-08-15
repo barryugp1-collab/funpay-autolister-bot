@@ -3,11 +3,13 @@ const path = require('path');
 
 const FILE = path.join(__dirname, 'queue-data.json');
 const MAX_HISTORY = 50;
+const STOCK_DEDUPE_WINDOW_MS = 10 * 60 * 1000; // don't re-trigger the same stock line within 10 min
 
 function defaultState() {
   return {
     queue: [], paused: false, lastPoll: null, lastResult: null, nextId: 1,
     history: [], holds: {}, nextHoldId: 1, offlineAlerted: false,
+    stockTriggers: {},
   };
 }
 
@@ -18,6 +20,7 @@ function load() {
     if (!state.holds) state.holds = {};
     if (!state.nextHoldId) state.nextHoldId = 1;
     if (state.offlineAlerted === undefined) state.offlineAlerted = false;
+    if (!state.stockTriggers) state.stockTriggers = {};
     return state;
   } catch (e) {
     return defaultState();
@@ -53,7 +56,7 @@ function clearQueue() {
 
 function stopNow() {
   const state = load();
-  state.queue = state.queue.filter((c) => !['list', 'bulk', 'confirm_list', 'dryrun'].includes(c.type));
+  state.queue = state.queue.filter((c) => !['list', 'bulk', 'confirm_list', 'dryrun', 'stock_check'].includes(c.type));
   state.queue.push({ id: state.nextId++, type: 'stop', createdAt: Date.now() });
   save(state);
 }
@@ -141,8 +144,29 @@ function markOfflineAlerted() {
   save(state);
 }
 
+// ---- Stock-feed dedupe (prevents re-triggering a hold every time the
+// same Captain Hook stock line reappears within the window) ----
+function wasRecentlyTriggered(key) {
+  const state = load();
+  const ts = state.stockTriggers[key];
+  if (!ts) return false;
+  return (Date.now() - ts) < STOCK_DEDUPE_WINDOW_MS;
+}
+
+function markTriggered(key) {
+  const state = load();
+  state.stockTriggers[key] = Date.now();
+  // prune old entries so this doesn't grow forever
+  const cutoff = Date.now() - STOCK_DEDUPE_WINDOW_MS;
+  for (const k of Object.keys(state.stockTriggers)) {
+    if (state.stockTriggers[k] < cutoff) delete state.stockTriggers[k];
+  }
+  save(state);
+}
+
 module.exports = {
   enqueue, removeAt, clearQueue, stopNow, setPaused, getStatus, drainDeliverable,
   setLastResult, addHistory, getHistory, findRecentDuplicate,
-  holdForConfirmation, getHold, listHolds, removeHold, markOfflineAlerted, load,
+  holdForConfirmation, getHold, listHolds, removeHold, markOfflineAlerted,
+  wasRecentlyTriggered, markTriggered, load,
 };
