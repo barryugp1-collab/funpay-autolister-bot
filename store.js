@@ -71,19 +71,26 @@ function getStatus() { return load(); }
 
 function drainDeliverable() {
   const state = load();
-  let deliverable;
-  if (state.paused) {
-    deliverable = state.queue.filter((c) => c.type === 'stop');
-    state.queue = state.queue.filter((c) => c.type !== 'stop');
-  } else {
-    deliverable = state.queue;
-    state.queue = [];
+  // /stop always gets delivered immediately, even if paused or mid-queue.
+  const stops = state.queue.filter((c) => c.type === 'stop');
+  state.queue = state.queue.filter((c) => c.type !== 'stop');
+
+  let deliverable = [...stops];
+
+  // Otherwise, only ever hand out ONE regular command per poll. This
+  // prevents a page reload triggered by one command (list/bulk/confirm)
+  // from killing the script mid-way through a batch and silently
+  // dropping whatever hadn't been processed yet.
+  if (!state.paused && state.queue.length) {
+    deliverable.push(state.queue.shift());
   }
+
   state.lastPoll = Date.now();
   state.offlineAlerted = false;
   save(state);
   return { paused: state.paused, commands: deliverable };
 }
+
 
 function setLastResult(result) {
   const state = load();
