@@ -3,13 +3,13 @@ const path = require('path');
 
 const FILE = path.join(__dirname, 'queue-data.json');
 const MAX_HISTORY = 50;
-const STOCK_DEDUPE_WINDOW_MS = 10 * 60 * 1000; // don't re-trigger the same stock line within 10 min
+const STOCK_DEDUPE_WINDOW_MS = 10 * 60 * 1000;
 
 function defaultState() {
   return {
     queue: [], paused: false, lastPoll: null, lastResult: null, nextId: 1,
     history: [], holds: {}, nextHoldId: 1, offlineAlerted: false,
-    stockTriggers: {},
+    stockTriggers: {}, customPetNames: [],
   };
 }
 
@@ -21,6 +21,7 @@ function load() {
     if (!state.nextHoldId) state.nextHoldId = 1;
     if (state.offlineAlerted === undefined) state.offlineAlerted = false;
     if (!state.stockTriggers) state.stockTriggers = {};
+    if (!state.customPetNames) state.customPetNames = [];
     return state;
   } catch (e) {
     return defaultState();
@@ -71,16 +72,11 @@ function getStatus() { return load(); }
 
 function drainDeliverable() {
   const state = load();
-  // /stop always gets delivered immediately, even if paused or mid-queue.
   const stops = state.queue.filter((c) => c.type === 'stop');
   state.queue = state.queue.filter((c) => c.type !== 'stop');
 
   let deliverable = [...stops];
 
-  // Otherwise, only ever hand out ONE regular command per poll. This
-  // prevents a page reload triggered by one command (list/bulk/confirm)
-  // from killing the script mid-way through a batch and silently
-  // dropping whatever hadn't been processed yet.
   if (!state.paused && state.queue.length) {
     deliverable.push(state.queue.shift());
   }
@@ -90,7 +86,6 @@ function drainDeliverable() {
   save(state);
   return { paused: state.paused, commands: deliverable };
 }
-
 
 function setLastResult(result) {
   const state = load();
@@ -151,8 +146,6 @@ function markOfflineAlerted() {
   save(state);
 }
 
-// ---- Stock-feed dedupe (prevents re-triggering a hold every time the
-// same Captain Hook stock line reappears within the window) ----
 function wasRecentlyTriggered(key) {
   const state = load();
   const ts = state.stockTriggers[key];
@@ -163,7 +156,6 @@ function wasRecentlyTriggered(key) {
 function markTriggered(key) {
   const state = load();
   state.stockTriggers[key] = Date.now();
-  // prune old entries so this doesn't grow forever
   const cutoff = Date.now() - STOCK_DEDUPE_WINDOW_MS;
   for (const k of Object.keys(state.stockTriggers)) {
     if (state.stockTriggers[k] < cutoff) delete state.stockTriggers[k];
@@ -171,9 +163,27 @@ function markTriggered(key) {
   save(state);
 }
 
+// ---- Dynamically-discovered brainrot names (from stock/scanner feeds) ----
+function getCustomPetNames() {
+  return load().customPetNames || [];
+}
+
+// Returns true if it was actually new and got added; false if it already existed.
+function addCustomPetName(name) {
+  const trimmed = (name || '').trim();
+  if (!trimmed) return false;
+  const state = load();
+  if (!state.customPetNames) state.customPetNames = [];
+  const exists = state.customPetNames.some((n) => n.toLowerCase() === trimmed.toLowerCase());
+  if (exists) return false;
+  state.customPetNames.push(trimmed);
+  save(state);
+  return true;
+}
+
 module.exports = {
   enqueue, removeAt, clearQueue, stopNow, setPaused, getStatus, drainDeliverable,
   setLastResult, addHistory, getHistory, findRecentDuplicate,
   holdForConfirmation, getHold, listHolds, removeHold, markOfflineAlerted,
-  wasRecentlyTriggered, markTriggered, load,
+  wasRecentlyTriggered, markTriggered, getCustomPetNames, addCustomPetName, load,
 };
