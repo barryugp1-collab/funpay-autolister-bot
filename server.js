@@ -16,6 +16,9 @@ if (!DISCORD_TOKEN || !CLIENT_ID || !GUILD_ID || !RESULTS_CHANNEL_ID || !API_KEY
   process.exit(1);
 }
 
+const STALE_HOLD_MS = 5 * 60 * 1000; // remind after 5 min unconfirmed
+const STALE_HOLD_REMINDER_COOLDOWN_MS = 10 * 60 * 1000; // don't re-nag more than once per 10 min
+
 const BASE_PET_NAMES = [
   'Garama and Madundung', 'Burguro and Fryuro', 'La Secret Combinasion', 'Cash or Card',
   'Fragola La La La', 'Festive 67', 'Boppin Bunny', 'Sammyni Fattini',
@@ -128,7 +131,6 @@ function fmtQueue(queue) {
 
 client.on('ready', () => console.log(`Discord bot logged in as ${client.user.tag}`));
 
-// ---------- Stock hold feed (Captain Hook) ----------
 function stripMd(s) { return s.replace(/\*\*/g, '').replace(/__/g, ''); }
 
 function toMsRaw(dollars) {
@@ -206,7 +208,6 @@ async function handleStockMessage(message) {
   }
 }
 
-// ---------- Auto-bulk scanner feed (Brainrot Scanner) ----------
 function parseScannerLine(line) {
   const m = line.match(/^#\d+\s+(.+?)\s*\(\$?([\d.]+)\s*(M|B)\/s\)\s*\[([^\]]*)\]\s*\{([^}]*)\}\s*$/i);
   if (!m) return null;
@@ -259,14 +260,12 @@ async function handleScannerMessage(message) {
     store.markTriggered(key);
 
     if (wasAlreadyTracked) {
-      // Already-known brainrot — keep the original no-confirmation auto-list behavior.
       let line = canonical;
       if (entry.mutation) line += ` [${entry.mutation}]`;
       line += ` ${entry.targetMsRaw}`;
       if (entry.traits.length) line += ` {${entry.traits.join(',')}}`;
       bulkLines.push(line);
     } else {
-      // Brand new — hold for /confirm instead of auto-listing straight away.
       store.enqueue('stock_check', {
         petName: canonical,
         mutation: entry.mutation,
@@ -611,7 +610,6 @@ async function postSaleToDiscord(payload) {
   }
 }
 
-// ---------- HTTP API (used by the userscript) ----------
 const app = express();
 app.use(express.json());
 
@@ -686,6 +684,18 @@ async function main() {
       } catch (e) { console.error('Failed to post offline alert:', e); }
     }
   }, 30000);
+
+  setInterval(async () => {
+    const stale = store.getStaleHolds(STALE_HOLD_MS, STALE_HOLD_REMINDER_COOLDOWN_MS);
+    if (!stale.length) return;
+    try {
+      const channel = await client.channels.fetch(RESULTS_CHANNEL_ID);
+      if (!channel) return;
+      const lines = stale.map((h) => `#${h.id} ${h.petName}${h.mutation ? ` [${h.mutation}]` : ''} ${h.targetMsRaw || ''} → $${Number(h.customerPrice).toFixed(2)}`);
+      await channel.send(`⏰ Reminder: ${stale.length} item(s) still waiting for /confirm or /cancel:\n\`\`\`\n${lines.join('\n')}\n\`\`\`\nUse /confirm-all to approve everything at once.`);
+      stale.forEach((h) => store.markHoldReminded(h.id));
+    } catch (e) { console.error('Failed to post stale-hold reminder:', e); }
+  }, 60000);
 
   const port = PORT || 3000;
   app.listen(port, () => console.log(`API listening on port ${port}`));
