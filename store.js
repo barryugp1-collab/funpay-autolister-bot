@@ -163,12 +163,10 @@ function markTriggered(key) {
   save(state);
 }
 
-// ---- Dynamically-discovered brainrot names (from stock/scanner feeds) ----
 function getCustomPetNames() {
   return load().customPetNames || [];
 }
 
-// Returns true if it was actually new and got added; false if it already existed.
 function addCustomPetName(name) {
   const trimmed = (name || '').trim();
   if (!trimmed) return false;
@@ -181,9 +179,30 @@ function addCustomPetName(name) {
   return true;
 }
 
+// ---- Stale-hold reminders (nudges you in Discord if a hold sits too long) ----
+function markHoldReminded(id) {
+  const state = load();
+  if (state.holds[id]) {
+    state.holds[id].remindedAt = Date.now();
+    save(state);
+  }
+}
+
+function getStaleHolds(staleMs, reminderCooldownMs) {
+  const state = load();
+  const now = Date.now();
+  return Object.values(state.holds).filter((h) => {
+    const age = now - h.createdAt;
+    if (age < staleMs) return false;
+    const lastReminded = h.remindedAt || 0;
+    return (now - lastReminded) > reminderCooldownMs;
+  });
+}
+
 module.exports = {
   enqueue, removeAt, clearQueue, stopNow, setPaused, getStatus, drainDeliverable,
   setLastResult, addHistory, getHistory, findRecentDuplicate,
   holdForConfirmation, getHold, listHolds, removeHold, markOfflineAlerted,
-  wasRecentlyTriggered, markTriggered, getCustomPetNames, addCustomPetName, load,
+  wasRecentlyTriggered, markTriggered, getCustomPetNames, addCustomPetName,
+  markHoldReminded, getStaleHolds, load,
 };
