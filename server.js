@@ -7,7 +7,8 @@ const store = require('./store');
 
 const {
   DISCORD_TOKEN, CLIENT_ID, GUILD_ID, RESULTS_CHANNEL_ID, API_KEY, PORT,
-  STOCK_BOT_ID, // optional — if set, only this author's messages are parsed as stock feed
+  STOCK_BOT_ID,    // optional — Captain Hook's user ID, filters the stock-hold feed
+  SCANNER_BOT_ID,  // optional — Brainrot Scanner's user ID, filters the auto-bulk feed
 } = process.env;
 
 if (!DISCORD_TOKEN || !CLIENT_ID || !GUILD_ID || !RESULTS_CHANNEL_ID || !API_KEY) {
@@ -32,6 +33,16 @@ const TRAITS = [
   'Rose', 'Santa Hat', 'Shark Fin', 'Skeleton', 'Skibidi', 'Sleepy', 'Snowy', 'Sombrero',
   'Spider', 'Strawberry', 'Taco', 'Tie', 'UFO', 'Wet', 'Witching Hour', 'Zombie',
 ];
+
+// Maps names used by external scanner bots to your game's actual trait names.
+// Add more entries here if another scanner uses different shorthand.
+const TRAIT_ALIASES = {
+  claws: 'Crab Claw',
+};
+function normalizeTraitName(raw) {
+  const key = raw.trim().toLowerCase();
+  return TRAIT_ALIASES[key] || raw.trim();
+}
 
 const client = new Client({
   intents: [
@@ -113,7 +124,7 @@ function fmtQueue(queue) {
 
 client.on('ready', () => console.log(`Discord bot logged in as ${client.user.tag}`));
 
-// ---------- Stock feed listener (Captain Hook parsing) ----------
+// ---------- Stock hold feed (Captain Hook — "name:/money per sec:/..." blocks) ----------
 function stripMd(s) {
   return s.replace(/\*\*/g, '').replace(/__/g, '');
 }
@@ -137,7 +148,7 @@ function parseStockMessage(rawContent) {
     const traitsRaw = m[4].trim();
     const traits = (!traitsRaw || /^none$/i.test(traitsRaw))
       ? []
-      : traitsRaw.split(',').map((t) => t.trim()).filter(Boolean);
+      : traitsRaw.split(',').map((t) => normalizeTraitName(t)).filter(Boolean);
     if (!name || isNaN(dollars)) continue;
     entries.push({ name, dollars, mutation, traits });
   }
@@ -148,6 +159,7 @@ async function handleStockMessage(message) {
   if (!message.content) return;
   if (STOCK_BOT_ID && message.author.id !== STOCK_BOT_ID) return;
   if (message.channel.id !== RESULTS_CHANNEL_ID) return;
+  if (!message.content.toLowerCase().includes('money per sec')) return;
 
   const entries = parseStockMessage(message.content);
   if (!entries.length) return;
@@ -157,7 +169,7 @@ async function handleStockMessage(message) {
     if (!match) continue;
 
     const targetMsRaw = toMsRaw(entry.dollars);
-    const key = [match, entry.mutation, targetMsRaw, entry.traits.slice().sort().join(',')].join('|').toLowerCase();
+    const key = ['stock', match, entry.mutation, targetMsRaw, entry.traits.slice().sort().join(',')].join('|').toLowerCase();
 
     if (store.wasRecentlyTriggered(key)) continue;
     store.markTriggered(key);
@@ -178,8 +190,72 @@ async function handleStockMessage(message) {
   }
 }
 
+// ---------- Auto-bulk scanner feed (Brainrot Scanner — "#1 Name ($XM/s) [Mut] {Traits}") ----------
+function parseScannerLine(line) {
+  const m = line.match(/^#\d+\s+(.+?)\s*\(\$?([\d.]+)\s*(M|B)\/s\)\s*\[([^\]]*)\]\s*\{([^}]*)\}\s*$/i);
+  if (!m) return null;
+  const petName = m[1].trim();
+  const targetMsRaw = `${m[2]}${m[3].toUpperCase()}/s`;
+  let mutation = m[4].trim();
+  if (/^none$/i.test(mutation)) mutation = '';
+  const traitsRaw = m[5].trim();
+  const traits = (!traitsRaw || /^none$/i.test(traitsRaw))
+    ? []
+    : traitsRaw.split(',').map((t) => normalizeTraitName(t)).filter(Boolean);
+  return { petName, targetMsRaw, mutation, traits };
+}
+
+function parseScannerMessage(rawContent) {
+  const content = rawContent.replace(/```/g, '').replace(/\*\*/g, '');
+  const lines = content.split('\n').map((l) => l.trim()).filter(Boolean);
+  const entries = [];
+  for (const line of lines) {
+    const parsed = parseScannerLine(line);
+    if (parsed) entries.push(parsed);
+  }
+  return entries;
+}
+
+async function handleScannerMessage(message) {
+  if (!message.content) return;
+  if (message.channel.id !== RESULTS_CHANNEL_ID) return;
+  if (SCANNER_BOT_ID && message.author.id !== SCANNER_BOT_ID) return;
+  if (!/#\d+\s+.+\(\$?[\d.]+\s*[mb]\/s\)/i.test(message.content)) return;
+
+  const entries = parseScannerMessage(message.content);
+  if (!entries.length) return;
+
+  const bulkLines = [];
+  for (const entry of entries) {
+    const match = PET_NAMES.find((p) => p.toLowerCase() === entry.petName.toLowerCase());
+    if (!match) continue;
+
+    const key = ['scan', match, entry.mutation, entry.targetMsRaw, entry.traits.slice().sort().join(',')].join('|').toLowerCase();
+    if (store.wasRecentlyTriggered(key)) continue;
+    store.markTriggered(key);
+
+    let line = match;
+    if (entry.mutation) line += ` [${entry.mutation}]`;
+    line += ` ${entry.targetMsRaw}`;
+    if (entry.traits.length) line += ` {${entry.traits.join(',')}}`;
+    bulkLines.push(line);
+  }
+
+  if (!bulkLines.length) return;
+
+  store.enqueue('bulk', { text: bulkLines.join('\n') });
+
+  try {
+    const channel = await client.channels.fetch(RESULTS_CHANNEL_ID);
+    if (channel) {
+      await channel.send(`📡 Scanner match — auto-queuing ${bulkLines.length} listing(s):\n\`\`\`\n${bulkLines.join('\n')}\n\`\`\``);
+    }
+  } catch (e) { console.error('Failed to post scanner-match note:', e); }
+}
+
 client.on('messageCreate', (message) => {
   handleStockMessage(message).catch((e) => console.error('Stock message handling error:', e));
+  handleScannerMessage(message).catch((e) => console.error('Scanner message handling error:', e));
 });
 
 client.on('interactionCreate', async (interaction) => {
@@ -451,6 +527,27 @@ async function postBulkProgress(p) {
   }
 }
 
+async function postSaleToDiscord(payload) {
+  try {
+    const channel = await client.channels.fetch(RESULTS_CHANNEL_ID);
+    if (!channel) return;
+    const embed = new EmbedBuilder()
+      .setTitle('🛒 Item Sold')
+      .setColor(0x9b59b6)
+      .addFields(
+        { name: 'Buyer', value: payload.buyerName || 'unknown', inline: true },
+        { name: 'Character', value: payload.characterName || 'unknown', inline: true },
+        { name: 'Item', value: payload.itemTitle || 'unknown' },
+        { name: 'Price', value: `$${Number(payload.price).toFixed(2)}`, inline: true },
+        { name: 'Order', value: `#${payload.orderId}`, inline: true },
+      )
+      .setTimestamp(Date.now());
+    await channel.send({ embeds: [embed] });
+  } catch (e) {
+    console.error('Failed to post sale to Discord:', e);
+  }
+}
+
 // ---------- HTTP API (used by the userscript) ----------
 const app = express();
 app.use(express.json());
@@ -485,6 +582,12 @@ app.post('/api/result', checkAuth, async (req, res) => {
 
   if (payload.type === 'dryrun') {
     await postDryRunResult(payload);
+    res.json({ ok: true });
+    return;
+  }
+
+  if (payload.type === 'sale') {
+    await postSaleToDiscord(payload);
     res.json({ ok: true });
     return;
   }
