@@ -7,8 +7,8 @@ const store = require('./store');
 
 const {
   DISCORD_TOKEN, CLIENT_ID, GUILD_ID, RESULTS_CHANNEL_ID, API_KEY, PORT,
-  STOCK_BOT_ID,    // optional — Captain Hook's user ID, filters the stock-hold feed
-  SCANNER_BOT_ID,  // optional — Brainrot Scanner's user ID, filters the auto-bulk feed
+  STOCK_BOT_ID,
+  SCANNER_BOT_ID,
 } = process.env;
 
 if (!DISCORD_TOKEN || !CLIENT_ID || !GUILD_ID || !RESULTS_CHANNEL_ID || !API_KEY) {
@@ -16,7 +16,7 @@ if (!DISCORD_TOKEN || !CLIENT_ID || !GUILD_ID || !RESULTS_CHANNEL_ID || !API_KEY
   process.exit(1);
 }
 
-const PET_NAMES = [
+const BASE_PET_NAMES = [
   'Garama and Madundung', 'Burguro and Fryuro', 'La Secret Combinasion', 'Cash or Card',
   'Fragola La La La', 'Festive 67', 'Boppin Bunny', 'Sammyni Fattini',
 ];
@@ -34,14 +34,18 @@ const TRAITS = [
   'Spider', 'Strawberry', 'Taco', 'Tie', 'UFO', 'Wet', 'Witching Hour', 'Zombie',
 ];
 
-// Maps names used by external scanner bots to your game's actual trait names.
-// Add more entries here if another scanner uses different shorthand.
-const TRAIT_ALIASES = {
-  claws: 'Crab Claw',
-};
+const TRAIT_ALIASES = { claws: 'Crab Claw' };
 function normalizeTraitName(raw) {
   const key = raw.trim().toLowerCase();
   return TRAIT_ALIASES[key] || raw.trim();
+}
+
+function getAllPetNames() {
+  return [...BASE_PET_NAMES, ...store.getCustomPetNames()];
+}
+function findTrackedName(rawName) {
+  const needle = rawName.trim().toLowerCase();
+  return getAllPetNames().find((p) => p.toLowerCase() === needle) || null;
 }
 
 const client = new Client({
@@ -54,8 +58,7 @@ const client = new Client({
 
 const commands = [
   new SlashCommandBuilder().setName('list').setDescription('Queue a single brainrot listing')
-    .addStringOption((o) => o.setName('brainrot').setDescription('Brainrot name').setRequired(true)
-      .addChoices(...PET_NAMES.map((n) => ({ name: n, value: n }))))
+    .addStringOption((o) => o.setName('brainrot').setDescription('Brainrot name — type to search').setRequired(true).setAutocomplete(true))
     .addStringOption((o) => o.setName('ms').setDescription('Target M/s, e.g. 62.5m/s').setRequired(false))
     .addStringOption((o) => o.setName('mutation').setDescription('Mutation').setRequired(false)
       .addChoices(...MUTATIONS.map((m) => ({ name: m, value: m }))))
@@ -65,8 +68,7 @@ const commands = [
     .addStringOption((o) => o.setName('items').setDescription('e.g. "Garama and Madundung 62.5m/s [Gold] {Fire,Lucky}"').setRequired(true)),
 
   new SlashCommandBuilder().setName('dry-run').setDescription('Check pricing without actually listing')
-    .addStringOption((o) => o.setName('brainrot').setDescription('Brainrot name').setRequired(true)
-      .addChoices(...PET_NAMES.map((n) => ({ name: n, value: n }))))
+    .addStringOption((o) => o.setName('brainrot').setDescription('Brainrot name — type to search').setRequired(true).setAutocomplete(true))
     .addStringOption((o) => o.setName('ms').setDescription('Target M/s, e.g. 62.5m/s').setRequired(false))
     .addStringOption((o) => o.setName('mutation').setDescription('Mutation').setRequired(false)
       .addChoices(...MUTATIONS.map((m) => ({ name: m, value: m }))))
@@ -78,6 +80,8 @@ const commands = [
     .addStringOption((o) => o.setName('mutation').setDescription('Override mutation (optional)').setRequired(false)
       .addChoices(...MUTATIONS.map((m) => ({ name: m, value: m }))))
     .addStringOption((o) => o.setName('traits').setDescription('Override traits, comma-separated (optional)').setRequired(false).setAutocomplete(true)),
+
+  new SlashCommandBuilder().setName('tracked-pets').setDescription('Show all tracked brainrot names (original + auto-discovered)'),
 
   new SlashCommandBuilder().setName('queue').setDescription('Show pending (not-yet-delivered) commands'),
   new SlashCommandBuilder().setName('queue-remove').setDescription('Remove a pending command by its position in /queue')
@@ -124,10 +128,8 @@ function fmtQueue(queue) {
 
 client.on('ready', () => console.log(`Discord bot logged in as ${client.user.tag}`));
 
-// ---------- Stock hold feed (Captain Hook — "name:/money per sec:/..." blocks) ----------
-function stripMd(s) {
-  return s.replace(/\*\*/g, '').replace(/__/g, '');
-}
+// ---------- Stock hold feed (Captain Hook) ----------
+function stripMd(s) { return s.replace(/\*\*/g, '').replace(/__/g, ''); }
 
 function toMsRaw(dollars) {
   const trim = (n) => parseFloat(n.toFixed(4)).toString();
@@ -164,18 +166,23 @@ async function handleStockMessage(message) {
   const entries = parseStockMessage(message.content);
   if (!entries.length) return;
 
+  const newlyAdded = [];
+
   for (const entry of entries) {
-    const match = PET_NAMES.find((p) => p.toLowerCase() === entry.name.toLowerCase());
-    if (!match) continue;
+    let canonical = findTrackedName(entry.name);
+    if (!canonical) {
+      const added = store.addCustomPetName(entry.name);
+      if (added) newlyAdded.push(entry.name);
+      canonical = entry.name;
+    }
 
     const targetMsRaw = toMsRaw(entry.dollars);
-    const key = ['stock', match, entry.mutation, targetMsRaw, entry.traits.slice().sort().join(',')].join('|').toLowerCase();
-
+    const key = ['stock', canonical, entry.mutation, targetMsRaw, entry.traits.slice().sort().join(',')].join('|').toLowerCase();
     if (store.wasRecentlyTriggered(key)) continue;
     store.markTriggered(key);
 
     store.enqueue('stock_check', {
-      petName: match,
+      petName: canonical,
       mutation: entry.mutation,
       targetMsRaw,
       traits: entry.traits,
@@ -184,13 +191,22 @@ async function handleStockMessage(message) {
     try {
       const channel = await client.channels.fetch(RESULTS_CHANNEL_ID);
       if (channel) {
-        await channel.send(`📦 Stock match: **${match}**${entry.mutation ? ` [${entry.mutation}]` : ''} @ ${targetMsRaw} — checking FunPay price…`);
+        await channel.send(`📦 Stock match: **${canonical}**${entry.mutation ? ` [${entry.mutation}]` : ''} @ ${targetMsRaw} — checking FunPay price…`);
       }
     } catch (e) { console.error('Failed to post stock-match note:', e); }
   }
+
+  if (newlyAdded.length) {
+    try {
+      const channel = await client.channels.fetch(RESULTS_CHANNEL_ID);
+      if (channel) {
+        await channel.send(`🆕 New brainrot${newlyAdded.length > 1 ? 's' : ''} detected via stock feed, added to tracked list: **${newlyAdded.join('**, **')}**. Held above — use /confirm.`);
+      }
+    } catch (e) { console.error('Failed to post new-name note:', e); }
+  }
 }
 
-// ---------- Auto-bulk scanner feed (Brainrot Scanner — "#1 Name ($XM/s) [Mut] {Traits}") ----------
+// ---------- Auto-bulk scanner feed (Brainrot Scanner) ----------
 function parseScannerLine(line) {
   const m = line.match(/^#\d+\s+(.+?)\s*\(\$?([\d.]+)\s*(M|B)\/s\)\s*\[([^\]]*)\]\s*\{([^}]*)\}\s*$/i);
   if (!m) return null;
@@ -226,31 +242,58 @@ async function handleScannerMessage(message) {
   if (!entries.length) return;
 
   const bulkLines = [];
-  for (const entry of entries) {
-    const match = PET_NAMES.find((p) => p.toLowerCase() === entry.petName.toLowerCase());
-    if (!match) continue;
+  const newlyAdded = [];
 
-    const key = ['scan', match, entry.mutation, entry.targetMsRaw, entry.traits.slice().sort().join(',')].join('|').toLowerCase();
+  for (const entry of entries) {
+    let canonical = findTrackedName(entry.petName);
+    const wasAlreadyTracked = !!canonical;
+
+    if (!canonical) {
+      const added = store.addCustomPetName(entry.petName);
+      if (added) newlyAdded.push(entry.petName);
+      canonical = entry.petName;
+    }
+
+    const key = ['scan', canonical, entry.mutation, entry.targetMsRaw, entry.traits.slice().sort().join(',')].join('|').toLowerCase();
     if (store.wasRecentlyTriggered(key)) continue;
     store.markTriggered(key);
 
-    let line = match;
-    if (entry.mutation) line += ` [${entry.mutation}]`;
-    line += ` ${entry.targetMsRaw}`;
-    if (entry.traits.length) line += ` {${entry.traits.join(',')}}`;
-    bulkLines.push(line);
+    if (wasAlreadyTracked) {
+      // Already-known brainrot — keep the original no-confirmation auto-list behavior.
+      let line = canonical;
+      if (entry.mutation) line += ` [${entry.mutation}]`;
+      line += ` ${entry.targetMsRaw}`;
+      if (entry.traits.length) line += ` {${entry.traits.join(',')}}`;
+      bulkLines.push(line);
+    } else {
+      // Brand new — hold for /confirm instead of auto-listing straight away.
+      store.enqueue('stock_check', {
+        petName: canonical,
+        mutation: entry.mutation,
+        targetMsRaw: entry.targetMsRaw,
+        traits: entry.traits,
+      });
+    }
   }
 
-  if (!bulkLines.length) return;
+  if (bulkLines.length) {
+    store.enqueue('bulk', { text: bulkLines.join('\n') });
+    try {
+      const channel = await client.channels.fetch(RESULTS_CHANNEL_ID);
+      if (channel) {
+        await channel.send(`📡 Scanner match — auto-queuing ${bulkLines.length} listing(s):\n\`\`\`\n${bulkLines.join('\n')}\n\`\`\``);
+      }
+    } catch (e) { console.error('Failed to post scanner-match note:', e); }
+  }
 
-  store.enqueue('bulk', { text: bulkLines.join('\n') });
-
-  try {
-    const channel = await client.channels.fetch(RESULTS_CHANNEL_ID);
-    if (channel) {
-      await channel.send(`📡 Scanner match — auto-queuing ${bulkLines.length} listing(s):\n\`\`\`\n${bulkLines.join('\n')}\n\`\`\``);
-    }
-  } catch (e) { console.error('Failed to post scanner-match note:', e); }
+  if (newlyAdded.length) {
+    try {
+      const channel = await client.channels.fetch(RESULTS_CHANNEL_ID);
+      if (channel) {
+        await channel.send(`🆕 New brainrot${newlyAdded.length > 1 ? 's' : ''} detected via scanner, added to tracked list: **${newlyAdded.join('**, **')}**. Held for your /confirm (check above).`);
+      }
+    } catch (e) { console.error('Failed to post new-name note:', e); }
+  }
 }
 
 client.on('messageCreate', (message) => {
@@ -262,6 +305,13 @@ client.on('interactionCreate', async (interaction) => {
   if (interaction.isAutocomplete()) {
     const focused = interaction.options.getFocused(true);
     const cmd = interaction.commandName;
+
+    if ((cmd === 'list' || cmd === 'dry-run') && focused.name === 'brainrot') {
+      const q = (focused.value || '').toLowerCase();
+      const matches = getAllPetNames().filter((n) => n.toLowerCase().includes(q)).slice(0, 25);
+      await interaction.respond(matches.map((n) => ({ name: n, value: n })));
+      return;
+    }
 
     if (focused.name === 'traits') {
       const raw = focused.value || '';
@@ -349,6 +399,19 @@ client.on('interactionCreate', async (interaction) => {
         : (prior && prior.traits) || [];
       store.enqueue('list', { petName, targetMsRaw: ms, mutation, traits });
       await interaction.reply(`📥 Re-queued: **${petName}**${mutation ? ` [${mutation}]` : ''}${ms ? ` @ ${ms}` : ''}`);
+    } else if (commandName === 'tracked-pets') {
+      const base = BASE_PET_NAMES;
+      const custom = store.getCustomPetNames();
+      const lines = [
+        `**Original (${base.length}):**`,
+        base.map((n) => `• ${n}`).join('\n'),
+      ];
+      if (custom.length) {
+        lines.push('', `**Auto-discovered (${custom.length}):**`, custom.map((n) => `• ${n}`).join('\n'));
+      } else {
+        lines.push('', '_No auto-discovered names yet._');
+      }
+      await interaction.reply(lines.join('\n'));
     } else if (commandName === 'queue') {
       const state = store.getStatus();
       await interaction.reply(`\`\`\`\n${fmtQueue(state.queue)}\n\`\`\``);
