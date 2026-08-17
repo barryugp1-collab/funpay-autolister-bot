@@ -16,8 +16,8 @@ if (!DISCORD_TOKEN || !CLIENT_ID || !GUILD_ID || !RESULTS_CHANNEL_ID || !API_KEY
   process.exit(1);
 }
 
-const STALE_HOLD_MS = 5 * 60 * 1000; // remind after 5 min unconfirmed
-const STALE_HOLD_REMINDER_COOLDOWN_MS = 10 * 60 * 1000; // don't re-nag more than once per 10 min
+const STALE_HOLD_MS = 5 * 60 * 1000;
+const STALE_HOLD_REMINDER_COOLDOWN_MS = 10 * 60 * 1000;
 
 const BASE_PET_NAMES = [
   'Garama and Madundung', 'Burguro and Fryuro', 'La Secret Combinasion', 'Cash or Card',
@@ -610,6 +610,26 @@ async function postSaleToDiscord(payload) {
   }
 }
 
+async function postStockIncrementToDiscord(payload) {
+  try {
+    const channel = await client.channels.fetch(RESULTS_CHANNEL_ID);
+    if (!channel) return;
+    const embed = new EmbedBuilder()
+      .setTitle('📦 Stock increased')
+      .setColor(0x1abc9c)
+      .addFields(
+        { name: 'Pet', value: `${payload.petName}${payload.mutation ? ` [${payload.mutation}]` : ''}`, inline: true },
+        ...(payload.targetMsRaw ? [{ name: 'M/s', value: payload.targetMsRaw, inline: true }] : []),
+        { name: 'Offer', value: `#${payload.offerId}`, inline: true },
+        { name: 'Stock', value: `${payload.oldAmount ?? '?'} → ${payload.newAmount}`, inline: true },
+      )
+      .setTimestamp(Date.now());
+    await channel.send({ embeds: [embed] });
+  } catch (e) {
+    console.error('Failed to post stock increment to Discord:', e);
+  }
+}
+
 const app = express();
 app.use(express.json());
 
@@ -649,6 +669,12 @@ app.post('/api/result', checkAuth, async (req, res) => {
 
   if (payload.type === 'sale') {
     await postSaleToDiscord(payload);
+    res.json({ ok: true });
+    return;
+  }
+
+  if (payload.type === 'stock_increment') {
+    await postStockIncrementToDiscord(payload);
     res.json({ ok: true });
     return;
   }
