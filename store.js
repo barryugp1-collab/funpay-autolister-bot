@@ -9,7 +9,8 @@ function defaultState() {
   return {
     queue: [], paused: false, lastPoll: null, lastResult: null, nextId: 1,
     history: [], holds: {}, nextHoldId: 1, offlineAlerted: false,
-    stockTriggers: {}, customPetNames: [],
+    stockTriggers: {}, customPetNames: [],trades: [], tradeHistory: [],
+
   };
 }
 
@@ -198,11 +199,70 @@ function getStaleHolds(staleMs, reminderCooldownMs) {
     return (now - lastReminded) > reminderCooldownMs;
   });
 }
+// ── TRADE QUEUE ────────────────────────────────────────────────────
+
+function queueTrade(trade) {
+  const state = load();
+  if (!state.trades) state.trades = [];
+  if (!state.tradeHistory) state.tradeHistory = [];
+  const entry = {
+    id: Date.now().toString(),
+    username: trade.username,
+    petName: trade.petName,
+    mutation: trade.mutation || 'None',
+    targetMsRaw: trade.targetMsRaw || '',
+    traits: trade.traits || [],
+    orderId: trade.orderId || null,
+    status: 'pending',
+    createdAt: Date.now(),
+  };
+  state.trades.push(entry);
+  save(state);
+  return entry;
+}
+
+function getPendingTrade() {
+  const state = load();
+  if (!state.trades) return null;
+  return state.trades.find((t) => t.status === 'pending') || null;
+}
+
+function resolveTrade(id, result) {
+  const state = load();
+  if (!state.trades) return null;
+  if (!state.tradeHistory) state.tradeHistory = [];
+  const idx = state.trades.findIndex((t) => t.id === id);
+  if (idx === -1) return null;
+  const trade = state.trades[idx];
+  trade.status = result.status; // 'success' | 'failed'
+  trade.error = result.error || null;
+  trade.resolvedAt = Date.now();
+  state.trades.splice(idx, 1);
+  state.tradeHistory.unshift(trade);
+  if (state.tradeHistory.length > 50) state.tradeHistory.length = 50;
+  save(state);
+  return trade;
+}
+
+function getTradeHistory(count) {
+  const state = load();
+  return (state.tradeHistory || []).slice(0, count || 10);
+}
+
+function cancelPendingTrades() {
+  const state = load();
+  if (!state.trades) return 0;
+  const count = state.trades.filter((t) => t.status === 'pending').length;
+  state.trades = state.trades.filter((t) => t.status !== 'pending');
+  save(state);
+  return count;
+}
 
 module.exports = {
   enqueue, removeAt, clearQueue, stopNow, setPaused, getStatus, drainDeliverable,
   setLastResult, addHistory, getHistory, findRecentDuplicate,
   holdForConfirmation, getHold, listHolds, removeHold, markOfflineAlerted,
   wasRecentlyTriggered, markTriggered, getCustomPetNames, addCustomPetName,
-  markHoldReminded, getStaleHolds, load,
+  markHoldReminded, getStaleHolds, load,queueTrade, getPendingTrade, resolveTrade, getTradeHistory, cancelPendingTrades,
+
 };
