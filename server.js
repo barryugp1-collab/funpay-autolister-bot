@@ -624,6 +624,51 @@ async function postSaleToDiscord(payload) {
     console.error('Failed to post sale to Discord:', e);
   }
 }
+async function postTradeResult(trade, result) {
+  try {
+    const channel = await client.channels.fetch(RESULTS_CHANNEL_ID);
+    if (!channel) return;
+
+    if (result.status === 'success') {
+      const embed = new EmbedBuilder()
+        .setTitle('🤝 Trade Sent')
+        .setColor(0x2ecc71)
+        .addFields(
+          { name: 'Buyer', value: trade.username, inline: true },
+          { name: 'Pet', value: `${trade.petName}${trade.mutation && trade.mutation !== 'None' ? ` [${trade.mutation}]` : ''}`, inline: true },
+          ...(trade.targetMsRaw ? [{ name: 'M/s', value: trade.targetMsRaw, inline: true }] : []),
+          ...(trade.orderId ? [{ name: 'Order', value: `#${trade.orderId}`, inline: true }] : []),
+        )
+        .setTimestamp(Date.now());
+      await channel.send({ embeds: [embed] });
+
+    } else {
+      const ERROR_LABELS = {
+        player_not_found:  '❌ Player not in server',
+        pet_not_found:     '❌ Pet not found in your base',
+        trade_declined:    '❌ Trade declined by buyer',
+        trade_timeout:     '⏱ Trade timed out (no response)',
+        remote_error:      '❌ Trade remote failed',
+        unknown:           '❌ Unknown error',
+      };
+      const label = ERROR_LABELS[result.error] || `❌ ${result.error || 'Unknown error'}`;
+      const embed = new EmbedBuilder()
+        .setTitle(label)
+        .setColor(0xe74c3c)
+        .addFields(
+          { name: 'Buyer', value: trade.username, inline: true },
+          { name: 'Pet', value: `${trade.petName}${trade.mutation && trade.mutation !== 'None' ? ` [${trade.mutation}]` : ''}`, inline: true },
+          ...(trade.orderId ? [{ name: 'Order', value: `#${trade.orderId}`, inline: true }] : []),
+          ...(result.detail ? [{ name: 'Detail', value: result.detail.slice(0, 500) }] : []),
+        )
+        .setFooter({ text: 'Use /trade-retry or handle manually.' })
+        .setTimestamp(Date.now());
+      await channel.send({ embeds: [embed] });
+    }
+  } catch (e) {
+    console.error('Failed to post trade result:', e);
+  }
+}
 
 async function postStockIncrementToDiscord(payload) {
   try {
