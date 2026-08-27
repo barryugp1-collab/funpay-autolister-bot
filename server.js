@@ -753,6 +753,51 @@ app.post('/api/result', checkAuth, async (req, res) => {
 app.get('/api/status', checkAuth, (req, res) => {
   res.json(store.getStatus());
 });
+// ── TRADE ENDPOINTS ────────────────────────────────────────────────
+
+// Userscript calls this when an order is detected
+app.post('/api/trade', checkAuth, async (req, res) => {
+  const { username, petName, mutation, targetMsRaw, traits, orderId } = req.body || {};
+  if (!username || !petName) return res.status(400).json({ error: 'username and petName required' });
+
+  const trade = store.queueTrade({ username, petName, mutation, targetMsRaw, traits, orderId });
+
+  try {
+    const channel = await client.channels.fetch(RESULTS_CHANNEL_ID);
+    if (channel) {
+      await channel.send(
+        `📬 New order — queuing trade for **${petName}**${mutation && mutation !== 'None' ? ` [${mutation}]` : ''} → buyer: \`${username}\`${orderId ? ` (Order #${orderId})` : ''}`
+      );
+    }
+  } catch (e) { console.error('Failed to post trade-queued note:', e); }
+
+  res.json({ ok: true, tradeId: trade.id });
+});
+
+// Delta polls this to get the next pending trade
+app.get('/api/trade/pending', checkAuth, (req, res) => {
+  const trade = store.getPendingTrade();
+  res.json({ trade: trade || null });
+});
+
+// Delta reports result back here
+app.post('/api/trade/result', checkAuth, async (req, res) => {
+  const { tradeId, status, error, detail } = req.body || {};
+  if (!tradeId || !status) return res.status(400).json({ error: 'tradeId and status required' });
+
+  const trade = store.resolveTrade(tradeId, { status, error, detail });
+  if (!trade) return res.status(404).json({ error: 'trade not found' });
+
+  await postTradeResult(trade, { status, error, detail });
+  res.json({ ok: true });
+});
+
+// Manual slash command to retry a failed trade
+// Add to commands array:
+// new SlashCommandBuilder().setName('trade-retry')
+//   .setDescription('Retry the last failed trade')
+//   .addStringOption(o => o.setName('username').setDescription('FunPay buyer username').setRequired(true))
+//   .addStringOption(o => o.setName('brainrot').setDescription('Pet name').setRequired(true).setAutocomplete(true))
 
 async function main() {
   await client.login(DISCORD_TOKEN);
