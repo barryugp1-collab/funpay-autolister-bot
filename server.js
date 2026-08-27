@@ -700,6 +700,16 @@ function checkAuth(req, res, next) {
 }
 
 app.get('/health', (req, res) => res.json({ ok: true }));
+app.post('/api/trade/test', checkAuth, async (req, res) => {
+  const { username, petName } = req.body || {};
+  if (!username || !petName) return res.status(400).json({ error: 'username and petName required' });
+  const trade = store.queueTrade({ username, petName, orderId: 'TEST-' + Date.now() });
+  try {
+    const channel = await client.channels.fetch(RESULTS_CHANNEL_ID);
+    if (channel) await channel.send(`🧪 Test trade queued — **${petName}** → \`${username}\``);
+  } catch (e) { /* ignore */ }
+  res.json({ ok: true, tradeId: trade.id });
+});
 
 app.get('/api/queue', checkAuth, (req, res) => {
   res.json(store.drainDeliverable());
