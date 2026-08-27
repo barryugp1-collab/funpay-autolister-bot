@@ -428,3 +428,318 @@ client.on('interactionCreate', async (interaction) => {
       await interaction.reply(lines.join('\n'));
     } else if (commandName === 'queue') {
       const state = store.getStatus();
+      await interaction.reply(`\`\`\`\n${fmtQueue(state.queue)}\n\`\`\``);
+    } else if (commandName === 'queue-remove') {
+      const idx = interaction.options.getInteger('index', true);
+      const removed = store.removeAt(idx - 1);
+      if (!removed) { await interaction.reply(`⚠️ No queued command at position ${idx}. Run /queue to check.`); return; }
+      await interaction.reply(`🗑️ Removed: ${removed.type === 'list' ? `/list ${removed.petName} ${removed.targetMsRaw || ''}`.trim() : removed.type}`);
+    } else if (commandName === 'status') {
+      const state = store.getStatus();
+      const online = state.lastPoll && (Date.now() - state.lastPoll < 30000);
+      const holdCount = Object.keys(state.holds || {}).length;
+      const lines = [
+        `Bridge: ${online ? '🟢 online' : "🔴 offline (userscript hasn't polled recently)"}`,
+        `Paused: ${state.paused ? '⏸ yes' : '▶️ no'}`,
+        `Queued commands: ${state.queue.length}`,
+        `Held for confirmation: ${holdCount}`,
+        state.lastResult
+          ? `Last result: ${state.lastResult.success ? '✅' : '❌'} ${state.lastResult.petName || ''}`
+          : 'Last result: none yet',
+      ];
+      await interaction.reply(lines.join('\n'));
+    } else if (commandName === 'history') {
+      const count = interaction.options.getInteger('count') || 10;
+      const items = store.getHistory(count);
+      if (!items.length) { await interaction.reply('No history yet.'); return; }
+      const lines = items.map((h) => {
+        const when = new Date(h.timestamp).toLocaleTimeString();
+        if (h.success) return `${when} ✅ ${h.petName}${h.mutation ? ` [${h.mutation}]` : ''} — $${Number(h.customerPrice).toFixed(2)}`;
+        return `${when} ❌ ${h.petName || 'unknown'} — ${h.error || 'failed'}`;
+      });
+      await interaction.reply(`\`\`\`\n${lines.join('\n')}\n\`\`\``);
+    } else if (commandName === 'confirm') {
+      const id = interaction.options.getInteger('id', true);
+      const hold = store.removeHold(id);
+      if (!hold) { await interaction.reply(`⚠️ No held item with id #${id}.`); return; }
+      store.enqueue('confirm_list', {
+        petName: hold.petName, mutation: hold.mutation, targetMsRaw: hold.targetMsRaw,
+        traits: hold.traits, price: hold.customerPrice, estimatedPayout: hold.estimatedPayout,
+        lowest: hold.lowest, sortedPrices: hold.sortedPrices,
+      });
+      await interaction.reply(`✅ Confirmed #${id} — proceeding with **${hold.petName}** at $${Number(hold.customerPrice).toFixed(2)}.`);
+    } else if (commandName === 'cancel') {
+      const id = interaction.options.getInteger('id', true);
+      const hold = store.removeHold(id);
+      if (!hold) { await interaction.reply(`⚠️ No held item with id #${id}.`); return; }
+      await interaction.reply(`🚫 Cancelled #${id} — **${hold.petName}** will not be listed.`);
+    } else if (commandName === 'confirm-all') {
+      const holds = store.listHolds();
+      if (!holds.length) { await interaction.reply('No held items to confirm.'); return; }
+      for (const hold of holds) {
+        store.removeHold(hold.id);
+        store.enqueue('confirm_list', {
+          petName: hold.petName, mutation: hold.mutation, targetMsRaw: hold.targetMsRaw,
+          traits: hold.traits, price: hold.customerPrice, estimatedPayout: hold.estimatedPayout,
+          lowest: hold.lowest, sortedPrices: hold.sortedPrices,
+        });
+      }
+      await interaction.reply(`✅ Confirmed ${holds.length} held item(s): ${holds.map((h) => h.petName).join(', ')}`);
+    } else if (commandName === 'cancel-all') {
+      const holds = store.listHolds();
+      if (!holds.length) { await interaction.reply('No held items to cancel.'); return; }
+      holds.forEach((h) => store.removeHold(h.id));
+      await interaction.reply(`🚫 Cancelled ${holds.length} held item(s): ${holds.map((h) => h.petName).join(', ')}`);
+    } else if (commandName === 'stop') {
+      store.stopNow();
+      await interaction.reply('🛑 Stop sent. Pending list/bulk commands cleared.');
+    } else if (commandName === 'pause') {
+      store.setPaused(true);
+      await interaction.reply('⏸ Paused. New commands will wait until /resume.');
+    } else if (commandName === 'resume') {
+      store.setPaused(false);
+      await interaction.reply('▶️ Resumed.');
+    } else if (commandName === 'clear') {
+      store.clearQueue();
+      await interaction.reply('🧹 Pending queue cleared.');
+    }
+  } catch (e) {
+    console.error(e);
+    if (!interaction.replied) await interaction.reply('⚠️ Something went wrong handling that command.');
+  }
+});
+
+async function postResultToDiscord(result, duplicateNote) {
+  try {
+    const channel = await client.channels.fetch(RESULTS_CHANNEL_ID);
+    if (!channel) return;
+    if (result.success) {
+      const sortedPrices = Array.isArray(result.sortedPrices) ? result.sortedPrices : [];
+      const embed = new EmbedBuilder()
+        .setTitle('🚀 Listed successfully')
+        .setColor(0x2ecc71)
+        .addFields(
+          { name: 'Pet', value: `${result.petName}${result.mutation ? ` [${result.mutation}]` : ''}`, inline: true },
+          ...(result.targetMsRaw ? [{ name: 'M/s', value: result.targetMsRaw, inline: true }] : []),
+          ...(sortedPrices.length ? [{ name: 'Competitor prices', value: sortedPrices.map((p) => '$' + Number(p).toFixed(2)).join(', ') }] : []),
+          ...(result.lowest != null ? [{ name: 'Lowest competitor', value: `$${Number(result.lowest).toFixed(2)}`, inline: true }] : []),
+          { name: 'Customer price', value: `$${Number(result.customerPrice).toFixed(2)}`, inline: true },
+          { name: 'Est. payout', value: `~$${Number(result.estimatedPayout).toFixed(2)}`, inline: true },
+        )
+        .setTimestamp(Date.now());
+      if (duplicateNote) embed.setDescription(duplicateNote);
+      await channel.send({ embeds: [embed] });
+    } else {
+      const embed = new EmbedBuilder()
+        .setTitle('❌ Listing failed')
+        .setColor(0xe74c3c)
+        .addFields(
+          { name: 'Pet', value: result.petName || 'unknown' },
+          { name: 'Error', value: (result.error || 'unknown error').slice(0, 1000) },
+        )
+        .setTimestamp(Date.now());
+      await channel.send({ embeds: [embed] });
+    }
+  } catch (e) {
+    console.error('Failed to post result to Discord:', e);
+  }
+}
+
+async function postHoldAlert(id, data) {
+  try {
+    const channel = await client.channels.fetch(RESULTS_CHANNEL_ID);
+    if (!channel) return;
+    const sortedPrices = Array.isArray(data.sortedPrices) ? data.sortedPrices : [];
+    const embed = new EmbedBuilder()
+      .setTitle(`⏸ Held for confirmation (#${id})`)
+      .setColor(0xf1c40f)
+      .setDescription(data.reason || 'Held for review.')
+      .addFields(
+        { name: 'Pet', value: `${data.petName}${data.mutation ? ` [${data.mutation}]` : ''}`, inline: true },
+        ...(data.targetMsRaw ? [{ name: 'M/s', value: data.targetMsRaw, inline: true }] : []),
+        ...(sortedPrices.length ? [{ name: 'Competitor prices', value: sortedPrices.map((p) => '$' + Number(p).toFixed(2)).join(', ') }] : []),
+        { name: 'Would list at', value: `$${Number(data.customerPrice).toFixed(2)}`, inline: true },
+        { name: 'Est. payout', value: `~$${Number(data.estimatedPayout).toFixed(2)}`, inline: true },
+      )
+      .setFooter({ text: `/confirm id:${id}  or  /cancel id:${id}  —  or /confirm-all / /cancel-all` });
+    await channel.send({ embeds: [embed] });
+  } catch (e) {
+    console.error('Failed to post hold alert:', e);
+  }
+}
+
+async function postDryRunResult(result) {
+  try {
+    const channel = await client.channels.fetch(RESULTS_CHANNEL_ID);
+    if (!channel) return;
+    if (result.success) {
+      const sortedPrices = Array.isArray(result.sortedPrices) ? result.sortedPrices : [];
+      const embed = new EmbedBuilder()
+        .setTitle('🧪 Dry run result')
+        .setColor(0x3498db)
+        .addFields(
+          { name: 'Pet', value: `${result.petName}${result.mutation ? ` [${result.mutation}]` : ''}`, inline: true },
+          ...(sortedPrices.length ? [{ name: 'Competitor prices', value: sortedPrices.map((p) => '$' + Number(p).toFixed(2)).join(', ') }] : []),
+          { name: 'Would list at', value: `$${Number(result.customerPrice).toFixed(2)}`, inline: true },
+          { name: 'Est. payout', value: `~$${Number(result.estimatedPayout).toFixed(2)}`, inline: true },
+        )
+        .setFooter({ text: 'No listing was created.' });
+      await channel.send({ embeds: [embed] });
+    } else {
+      await channel.send(`🧪 Dry run failed for **${result.petName || 'unknown'}**: ${result.error || 'unknown error'}`);
+    }
+  } catch (e) {
+    console.error('Failed to post dry run result:', e);
+  }
+}
+
+async function postBulkProgress(p) {
+  try {
+    const channel = await client.channels.fetch(RESULTS_CHANNEL_ID);
+    if (!channel) return;
+    const icon = p.success ? '✅' : '❌';
+    await channel.send(`${icon} Bulk: ${p.petName} — ${p.itemsLeft} item(s) left in queue.`);
+  } catch (e) {
+    console.error('Failed to post bulk progress:', e);
+  }
+}
+
+async function postSaleToDiscord(payload) {
+  try {
+    const channel = await client.channels.fetch(RESULTS_CHANNEL_ID);
+    if (!channel) return;
+    const embed = new EmbedBuilder()
+      .setTitle('🛒 Item Sold')
+      .setColor(0x9b59b6)
+      .addFields(
+        { name: 'Buyer', value: payload.buyerName || 'unknown', inline: true },
+        { name: 'Character', value: payload.characterName || 'unknown', inline: true },
+        { name: 'Item', value: payload.itemTitle || 'unknown' },
+        { name: 'Price', value: `$${Number(payload.price).toFixed(2)}`, inline: true },
+        { name: 'Order', value: `#${payload.orderId}`, inline: true },
+      )
+      .setTimestamp(Date.now());
+    await channel.send({ embeds: [embed] });
+  } catch (e) {
+    console.error('Failed to post sale to Discord:', e);
+  }
+}
+
+async function postStockIncrementToDiscord(payload) {
+  try {
+    const channel = await client.channels.fetch(RESULTS_CHANNEL_ID);
+    if (!channel) return;
+    const embed = new EmbedBuilder()
+      .setTitle('📦 Stock increased')
+      .setColor(0x1abc9c)
+      .addFields(
+        { name: 'Pet', value: `${payload.petName}${payload.mutation ? ` [${payload.mutation}]` : ''}`, inline: true },
+        ...(payload.targetMsRaw ? [{ name: 'M/s', value: payload.targetMsRaw, inline: true }] : []),
+        { name: 'Offer', value: `#${payload.offerId}`, inline: true },
+        { name: 'Stock', value: `${payload.oldAmount ?? '?'} → ${payload.newAmount}`, inline: true },
+      )
+      .setTimestamp(Date.now());
+    await channel.send({ embeds: [embed] });
+  } catch (e) {
+    console.error('Failed to post stock increment to Discord:', e);
+  }
+}
+
+const app = express();
+app.use(express.json());
+
+function checkAuth(req, res, next) {
+  const key = req.header('x-api-key');
+  if (!key || key !== API_KEY) return res.status(401).json({ error: 'unauthorized' });
+  next();
+}
+
+app.get('/health', (req, res) => res.json({ ok: true }));
+
+app.get('/api/queue', checkAuth, (req, res) => {
+  res.json(store.drainDeliverable());
+});
+
+app.post('/api/result', checkAuth, async (req, res) => {
+  const payload = req.body || {};
+
+  if (payload.type === 'hold') {
+    const id = store.holdForConfirmation(payload);
+    await postHoldAlert(id, payload);
+    res.json({ ok: true, holdId: id });
+    return;
+  }
+
+  if (payload.type === 'bulk_progress') {
+    await postBulkProgress(payload);
+    res.json({ ok: true });
+    return;
+  }
+
+  if (payload.type === 'dryrun') {
+    await postDryRunResult(payload);
+    res.json({ ok: true });
+    return;
+  }
+
+  if (payload.type === 'sale') {
+    await postSaleToDiscord(payload);
+    res.json({ ok: true });
+    return;
+  }
+
+  if (payload.type === 'stock_increment') {
+    await postStockIncrementToDiscord(payload);
+    res.json({ ok: true });
+    return;
+  }
+
+  let duplicateNote = null;
+  if (payload.success) {
+    const dup = store.findRecentDuplicate(payload.petName, payload.mutation, payload.targetMsRaw, 30 * 60 * 1000);
+    if (dup) duplicateNote = `⚠️ Same item was listed ${Math.round((Date.now() - dup.timestamp) / 60000)} min ago too.`;
+  }
+  store.setLastResult(payload);
+  store.addHistory(payload);
+  await postResultToDiscord(payload, duplicateNote);
+  res.json({ ok: true });
+});
+
+app.get('/api/status', checkAuth, (req, res) => {
+  res.json(store.getStatus());
+});
+
+async function main() {
+  await client.login(DISCORD_TOKEN);
+  await registerCommands();
+
+  setInterval(async () => {
+    const state = store.getStatus();
+    if (!state.lastPoll) return;
+    const offline = Date.now() - state.lastPoll > 40000;
+    if (offline && !state.offlineAlerted) {
+      store.markOfflineAlerted();
+      try {
+        const channel = await client.channels.fetch(RESULTS_CHANNEL_ID);
+        if (channel) await channel.send("⚠️ Bridge went offline — the userscript hasn't polled in over 40 seconds. Make sure the FunPay tab is open and active.");
+      } catch (e) { console.error('Failed to post offline alert:', e); }
+    }
+  }, 30000);
+
+  setInterval(async () => {
+    const stale = store.getStaleHolds(STALE_HOLD_MS, STALE_HOLD_REMINDER_COOLDOWN_MS);
+    if (!stale.length) return;
+    try {
+      const channel = await client.channels.fetch(RESULTS_CHANNEL_ID);
+      if (!channel) return;
+      const lines = stale.map((h) => `#${h.id} ${h.petName}${h.mutation ? ` [${h.mutation}]` : ''} ${h.targetMsRaw || ''} → $${Number(h.customerPrice).toFixed(2)}`);
+      await channel.send(`⏰ Reminder: ${stale.length} item(s) still waiting for /confirm or /cancel:\n\`\`\`\n${lines.join('\n')}\n\`\`\`\nUse /confirm-all to approve everything at once.`);
+      stale.forEach((h) => store.markHoldReminded(h.id));
+    } catch (e) { console.error('Failed to post stale-hold reminder:', e); }
+  }, 60000);
+
+  const port = PORT || 3000;
+  app.listen(port, () => console.log(`API listening on port ${port}`));
+}
+
+main();
