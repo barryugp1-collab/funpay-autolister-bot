@@ -244,9 +244,6 @@ async function handleScannerMessage(message) {
 
   const bulkLines = [];
   const newlyAdded = [];
-
-  // Keys seen in this message — used to allow duplicate stats within one message
-  // (they're real distinct items) while still deduping across separate messages.
   const keysThisMessage = [];
 
   for (const entry of entries) {
@@ -261,7 +258,6 @@ async function handleScannerMessage(message) {
 
     const key = ['scan', canonical, entry.mutation, entry.targetMsRaw, entry.traits.slice().sort().join(',')].join('|').toLowerCase();
 
-    // Skip only if triggered by a prior message — not by another line in this same message.
     if (store.wasRecentlyTriggered(key) && !keysThisMessage.includes(key)) {
       continue;
     }
@@ -284,8 +280,6 @@ async function handleScannerMessage(message) {
     }
   }
 
-  // Mark all keys after the loop so within-message entries don't block each other,
-  // but subsequent messages with the same stats are correctly deduped.
   for (const key of keysThisMessage) {
     store.markTriggered(key);
   }
@@ -624,6 +618,7 @@ async function postSaleToDiscord(payload) {
     console.error('Failed to post sale to Discord:', e);
   }
 }
+
 async function postTradeResult(trade, result) {
   try {
     const channel = await client.channels.fetch(RESULTS_CHANNEL_ID);
@@ -641,7 +636,6 @@ async function postTradeResult(trade, result) {
         )
         .setTimestamp(Date.now());
       await channel.send({ embeds: [embed] });
-
     } else {
       const ERROR_LABELS = {
         player_not_found:  '❌ Player not in server',
@@ -693,13 +687,16 @@ async function postStockIncrementToDiscord(payload) {
 const app = express();
 app.use(express.json());
 
+// ── AUTH — accepts both x-api-key header and Authorization: Bearer <key> ──
 function checkAuth(req, res, next) {
-  const key = req.header('x-api-key');
+  const key = req.header('x-api-key')
+    || (req.header('authorization') || '').replace(/^Bearer\s+/i, '').trim();
   if (!key || key !== API_KEY) return res.status(401).json({ error: 'unauthorized' });
   next();
 }
 
 app.get('/health', (req, res) => res.json({ ok: true }));
+
 app.post('/api/trade/test', checkAuth, async (req, res) => {
   const { username, petName } = req.body || {};
   if (!username || !petName) return res.status(400).json({ error: 'username and petName required' });
@@ -712,7 +709,57 @@ app.post('/api/trade/test', checkAuth, async (req, res) => {
 });
 
 app.get('/api/queue', checkAuth, (req, res) => {
+  store.updateLastPoll();
   res.json(store.drainDeliverable());
+});
+
+app.post('/api/queue', checkAuth, (req, res) => {
+  const payload = req.body || {};
+  const command = payload.command || 'bulk';
+  const pets = Array.isArray(payload.pets) ? payload.pets : [];
+
+  if (!pets.length) return res.status(400).json({ error: 'no pets provided' });
+
+  if (command === 'bulk') {
+    const lines = pets.map((p) => {
+      let line = p.name || p.petName || '';
+      if (!line) return null;
+      if (p.mps || p.targetMsRaw) line += ` ${p.mps || p.targetMsRaw}`;
+      if (p.mutation && p.mutation !== 'None') line += ` [${p.mutation}]`;
+      const traits = Array.isArray(p.traits)
+        ? p.traits
+        : (typeof p.traits === 'string' && p.traits && p.traits !== 'None'
+            ? p.traits.split(',').map((t) => t.trim()).filter(Boolean)
+            : []);
+      if (traits.length) line += ` {${traits.join(',')}}`;
+      return line;
+    }).filter(Boolean);
+
+    if (!lines.length) return res.status(400).json({ error: 'no valid pets after mapping' });
+    store.enqueue('bulk', { text: lines.join('\n') });
+    return res.json({ ok: true, queued: lines.length, command: 'bulk' });
+  }
+
+  if (command === 'confirm_list') {
+    for (const p of pets) {
+      const petName = p.name || p.petName || '';
+      if (!petName) continue;
+      const traits = Array.isArray(p.traits)
+        ? p.traits
+        : (typeof p.traits === 'string' && p.traits && p.traits !== 'None'
+            ? p.traits.split(',').map((t) => t.trim()).filter(Boolean)
+            : []);
+      store.enqueue('confirm_list', {
+        petName,
+        mutation: p.mutation && p.mutation !== 'None' ? p.mutation : '',
+        targetMsRaw: p.mps || p.targetMsRaw || '',
+        traits,
+      });
+    }
+    return res.json({ ok: true, queued: pets.length, command: 'confirm_list' });
+  }
+
+  return res.status(400).json({ error: `unknown command: ${command}` });
 });
 
 app.post('/api/result', checkAuth, async (req, res) => {
@@ -724,25 +771,21 @@ app.post('/api/result', checkAuth, async (req, res) => {
     res.json({ ok: true, holdId: id });
     return;
   }
-
   if (payload.type === 'bulk_progress') {
     await postBulkProgress(payload);
     res.json({ ok: true });
     return;
   }
-
   if (payload.type === 'dryrun') {
     await postDryRunResult(payload);
     res.json({ ok: true });
     return;
   }
-
   if (payload.type === 'sale') {
     await postSaleToDiscord(payload);
     res.json({ ok: true });
     return;
   }
-
   if (payload.type === 'stock_increment') {
     await postStockIncrementToDiscord(payload);
     res.json({ ok: true });
@@ -763,9 +806,8 @@ app.post('/api/result', checkAuth, async (req, res) => {
 app.get('/api/status', checkAuth, (req, res) => {
   res.json(store.getStatus());
 });
-// ── TRADE ENDPOINTS ────────────────────────────────────────────────
 
-// Userscript calls this when an order is detected
+// ── TRADE ENDPOINTS ────────────────────────────────────────────────
 app.post('/api/trade', checkAuth, async (req, res) => {
   const { username, petName, mutation, targetMsRaw, traits, orderId } = req.body || {};
   if (!username || !petName) return res.status(400).json({ error: 'username and petName required' });
@@ -784,13 +826,11 @@ app.post('/api/trade', checkAuth, async (req, res) => {
   res.json({ ok: true, tradeId: trade.id });
 });
 
-// Delta polls this to get the next pending trade
 app.get('/api/trade/pending', checkAuth, (req, res) => {
   const trade = store.getPendingTrade();
   res.json({ trade: trade || null });
 });
 
-// Delta reports result back here
 app.post('/api/trade/result', checkAuth, async (req, res) => {
   const { tradeId, status, error, detail } = req.body || {};
   if (!tradeId || !status) return res.status(400).json({ error: 'tradeId and status required' });
@@ -801,13 +841,6 @@ app.post('/api/trade/result', checkAuth, async (req, res) => {
   await postTradeResult(trade, { status, error, detail });
   res.json({ ok: true });
 });
-
-// Manual slash command to retry a failed trade
-// Add to commands array:
-// new SlashCommandBuilder().setName('trade-retry')
-//   .setDescription('Retry the last failed trade')
-//   .addStringOption(o => o.setName('username').setDescription('FunPay buyer username').setRequired(true))
-//   .addStringOption(o => o.setName('brainrot').setDescription('Pet name').setRequired(true).setAutocomplete(true))
 
 async function main() {
   await client.login(DISCORD_TOKEN);
