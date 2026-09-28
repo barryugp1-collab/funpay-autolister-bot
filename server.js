@@ -709,9 +709,9 @@ app.post('/api/trade/test', checkAuth, async (req, res) => {
 });
 
 app.get('/api/queue', checkAuth, (req, res) => {
-  store.updateLastPoll();
   res.json(store.drainDeliverable());
 });
+
 
 app.post('/api/queue', checkAuth, (req, res) => {
   const payload = req.body || {};
