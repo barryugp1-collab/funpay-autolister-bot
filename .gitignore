@@ -1,0 +1,15 @@
+# Dependencies
+node_modules/
+
+# Environment variables (secrets)
+.env
+.env.*
+!.env.example
+
+# Runtime state (contains usernames / trade data)
+queue-data.json
+*.log
+
+# OS junk
+.DS_Store
+Thumbs.db
